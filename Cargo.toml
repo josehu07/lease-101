@@ -1,0 +1,11 @@
+[package]
+name = "lease_sim"
+version = "0.1.0"
+edition = "2024"
+description = "Distributed lease algorithm simulation kit"
+
+[lib]
+# rlib for native consumers (gif helpers, tests); cdylib for the wasm build.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
