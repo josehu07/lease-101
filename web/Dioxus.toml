@@ -1,0 +1,13 @@
+[application]
+name = "lease_web"
+
+[web.app]
+# Browser tab title.
+title = "Bodega Consensus"
+
+[web.watcher]
+# Reload on changes to these paths during `dx serve`.
+watch_path = ["src", "assets"]
+
+# CSS is injected via the `asset!()` macro in main.rs, so no [web.resource]
+# styles are needed here.

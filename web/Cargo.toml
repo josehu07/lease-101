@@ -1,0 +1,10 @@
+[package]
+name = "lease_web"
+version = "0.1.0"
+edition = "2024"
+description = "Dioxus single-page static website for the Distributed Lease 101 walkthrough"
+
+[dependencies]
+# Pinned to match the installed `dx` CLI (0.7.9); dx refuses mismatched versions.
+dioxus = { version = "=0.7.9", features = ["web", "router"] }
+lease_sim = { path = ".." }

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- All-to-all leasing: a 5-node cluster with every pair connected (K5 mesh). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#10233f"/>
+      <stop offset="1" stop-color="#1b3a63"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <!-- 10 edges: every pair of the 5 ring nodes. -->
+  <g stroke="#6ea8fe" stroke-width="2.4" stroke-opacity="0.6" stroke-linecap="round">
+    <line x1="32" y1="10" x2="52.9" y2="25.2"/>
+    <line x1="32" y1="10" x2="44.9" y2="49.8"/>
+    <line x1="32" y1="10" x2="19.1" y2="49.8"/>
+    <line x1="32" y1="10" x2="11.1" y2="25.2"/>
+    <line x1="52.9" y1="25.2" x2="44.9" y2="49.8"/>
+    <line x1="52.9" y1="25.2" x2="19.1" y2="49.8"/>
+    <line x1="52.9" y1="25.2" x2="11.1" y2="25.2"/>
+    <line x1="44.9" y1="49.8" x2="19.1" y2="49.8"/>
+    <line x1="44.9" y1="49.8" x2="11.1" y2="25.2"/>
+    <line x1="19.1" y1="49.8" x2="11.1" y2="25.2"/>
+  </g>
+  <!-- 5 ring nodes on top of the mesh. -->
+  <g fill="#eef4ff">
+    <circle cx="32" cy="10" r="6"/>
+    <circle cx="52.9" cy="25.2" r="6"/>
+    <circle cx="44.9" cy="49.8" r="6"/>
+    <circle cx="19.1" cy="49.8" r="6"/>
+    <circle cx="11.1" cy="25.2" r="6"/>
+  </g>
+</svg>

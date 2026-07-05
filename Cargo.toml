@@ -1,3 +1,7 @@
+[workspace]
+# The Dioxus web app lives in `web/` and depends on the `lease_sim` core below.
+members = ["web"]
+
 [package]
 name = "lease_sim"
 version = "0.1.0"
