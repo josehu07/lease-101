@@ -42,9 +42,7 @@ pub fn App() -> Element {
     rsx! {
         Nav {}
         main { id: "top", class: "page",
-            Section {
-                id: "intro",
-                title: "Distributed lease",
+            Section { id: "intro", title: "Distributed lease",
                 p {
                     "A "
                     em { "lease" }
@@ -72,7 +70,12 @@ fn Footer() -> Element {
     rsx! {
         footer { class: "footer",
             "Author: Guanzhou Hu ("
-            a { href: "https://josehu.com", target: "_blank", rel: "noopener noreferrer", "https://josehu.com" }
+            a {
+                href: "https://josehu.com",
+                target: "_blank",
+                rel: "noopener noreferrer",
+                "https://josehu.com"
+            }
             "); Plain blog post version is also available "
             a { href: "TODO", target: "_blank", rel: "noopener noreferrer", "here" }
             "."
@@ -108,7 +111,7 @@ fn Nav() -> Element {
                         sup { "+" }
                     }
                     a {
-                        href: "https://github.com/josehu07/lease-demo",
+                        href: "https://github.com/josehu07/lease-101",
                         target: "_blank",
                         rel: "noopener noreferrer",
                         "GitHub"

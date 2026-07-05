@@ -11,7 +11,7 @@ The Dioxus single-page static website for the Distributed Lease 101 walkthrough.
 
 ## Tech stack
 
-- **Dioxus 0.7** (pinned `=0.7.3` to match the installed `dx` CLI; `dx` refuses mismatched dioxus versions).
+- **Dioxus 0.7** (pinned `=0.7.9` to match the installed `dx` CLI; `dx` refuses mismatched dioxus versions).
 - Features: `web` (client-side WASM renderer) + `router`.
 - Build/serve via the `dx` CLI: `dx serve` (dev) and `dx build --platform web` (static output under `target/dx/lease_web/debug|release/web/public`).
 
@@ -25,6 +25,7 @@ src/                # lease_sim core (engine, scenario, frame, ...)
 web/                # the Dioxus app (package `lease_web`)
   Cargo.toml        # depends on dioxus + lease_sim (path = "..")
   Dioxus.toml       # dx app config (title, watch paths)
+  index.html        # custom HTML shell (analytics tag; see Analytics below)
   src/
     main.rs         # entry point: launch + global assets (Root component)
     components.rs    # page components (App, Hero, Section, sim placeholder)
@@ -59,6 +60,22 @@ All external links open in a new tab (`target="_blank"` with `rel="noopener nore
 
 - Single global `assets/main.css`, loaded via the `asset!()` macro so the build injects a content-hashed URL automatically.
 - Light page theme with a dark-blue banner (its own `--nav-*` palette). CSS custom properties for the rest of the palette (`--grantor` orange, `--grantee` green to mirror Figure 2 in the paper). Responsive, system font stack.
+
+## Analytics
+
+The site is measured with Google Analytics (gtag.js, measurement ID `G-N2T5220LS6`).
+
+**Requirement.** Every served page must load the standard gtag.js snippet.
+
+**Invariant.** The gtag.js snippet appears **exactly once** per served document — never zero, never duplicated.
+
+The snippet lives in the `<head>` of the custom HTML shell `web/index.html`, *not* in a Dioxus component. This is what upholds the invariant:
+
+- `dx` auto-detects `web/index.html` at the web crate root as the shell for the whole app; it injects the WASM loader and head resources but passes the rest of `<head>` through verbatim (only a `<div id="main">` mount point is required).
+- The SPA is a single shell document. Client-side routing swaps the mounted `App` subtree, never reloading the shell — so the tag is loaded once at boot and covers every current and future subpage/route, with no risk of a component re-render injecting it twice.
+- Placing it in a component would be wrong: components can mount/re-render on navigation (duplicating the tag) and cannot reliably emit the inline init block into `<head>` before WASM boots.
+
+When adding pages/routes, do nothing analytics-specific — they inherit the tag from the shell automatically. Do **not** add gtag.js anywhere else.
 
 ## Status
 

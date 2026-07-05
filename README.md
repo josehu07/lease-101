@@ -21,4 +21,4 @@ TODO(command reference)
 
 ---
 
-Author: [Guanzhou Hu](https://josehu.com) (<josehgz@amazon.com>)
+Author: Guanzhou Hu ([https://josehu.com](https://josehu.com); email: <josehgz@amazon.com>)
