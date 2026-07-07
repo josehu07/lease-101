@@ -1,23 +1,29 @@
 # Distributed Lease 101
 
+[![Top language](https://img.shields.io/github/languages/top/josehu07/lease-101?color=EB9A4D)](https://github.com/josehu07/lease-101)
+[![Website](https://img.shields.io/website?url=https%3A%2F%2Fbodega-consensus.com&label=website)](https://bodega-consensus.com)
+
 This repo is a minimal demo bundle for the arcane art of distributed lease algorithms, plus an advertisement for **Bodega roster leases** — our latest contribution to the space.
 
 | | |
 | --- | --- |
 | Website: | [bodega-consensus.com](https://bodega-consensus.com) |
 | Blog: | [blog post link](TODO) |
-| Bodega Paper: | [OSDI '26 link](https://www.usenix.org/conference/osdi26/presentation/hu-guanzhou) |
-| Summerset KV: | [codebase link](https://github.com/josehu07/summerset) |
+| Bodega Paper: | [OSDI '26 paper link](https://www.usenix.org/conference/osdi26/presentation/hu-guanzhou) |
+| Summerset: | [KV codebase link](https://github.com/josehu07/summerset) |
 
-Design of this demo project is documented in [docs/](docs/DESIGN.md).
+A distilled summary of lease algorithms and the design of this demo project are documented under [docs/](docs/DESIGN.md).
 
-## Build
+## Dev
 
-To build everything this demo bundle has to offer:
+Local preview:
 
 ```sh
-TODO(command reference)
+cd web
+dx serve
 ```
+
+Deploy: automatic via GitHub Actions.
 
 ---
 

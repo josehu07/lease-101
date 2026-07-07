@@ -36,11 +36,31 @@ const ALGO_SECTIONS: &[SectionMeta] = &[
     },
 ];
 
-/// The whole single-page site: a hero, a sticky nav, then walkthrough sections.
+/// Client-side routes. The home walkthrough and a standalone simulator page,
+/// both sharing the sticky `Nav` banner via the `Shell` layout.
+#[derive(Routable, Clone, PartialEq)]
+#[rustfmt::skip]
+pub enum Route {
+    #[layout(Shell)]
+        #[route("/")]
+        Home {},
+        #[route("/sim")]
+        Sim {},
+}
+
+/// Shared layout: the sticky banner over whichever route is active.
 #[component]
-pub fn App() -> Element {
+fn Shell() -> Element {
     rsx! {
         Nav {}
+        Outlet::<Route> {}
+    }
+}
+
+/// Home: the single-page walkthrough — intro, then one section per algorithm.
+#[component]
+fn Home() -> Element {
+    rsx! {
         main { id: "top", class: "page",
             Section { id: "intro", title: "Distributed lease",
                 p {
@@ -64,12 +84,28 @@ pub fn App() -> Element {
     }
 }
 
+/// Sim: a standalone simulator playground with scenario-setup controls over a
+/// live canvas. Wiring it to a running `lease_sim` engine comes next.
+#[component]
+fn Sim() -> Element {
+    rsx! {
+        main { id: "top", class: "page",
+            section { class: "section pg-section",
+                h2 { "Distributed lease simulator playground" }
+                crate::playground::Playground {}
+            }
+            Footer {}
+        }
+    }
+}
+
 /// Small footer at the bottom of the page body (not pinned).
 #[component]
 fn Footer() -> Element {
     rsx! {
         footer { class: "footer",
-            "Author: Guanzhou Hu ("
+            strong { "Author:" }
+            " Guanzhou Hu ("
             a {
                 href: "https://josehu.com",
                 target: "_blank",
@@ -89,19 +125,13 @@ fn Nav() -> Element {
     rsx! {
         nav { class: "nav",
             div { class: "nav-inner",
-                a { class: "nav-brand", href: "#top", "Bodega Consensus" }
+                Link { class: "nav-brand", to: Route::Home {}, "Bodega Consensus" }
                 div { class: "nav-links",
                     a {
                         href: "https://www.usenix.org/conference/osdi26/presentation/hu-guanzhou",
                         target: "_blank",
                         rel: "noopener noreferrer",
                         "Paper"
-                    }
-                    a {
-                        href: "https://github.com/josehu07/summerset",
-                        target: "_blank",
-                        rel: "noopener noreferrer",
-                        "Summerset"
                     }
                     a {
                         href: "https://github.com/josehu07/summerset/tree/main/tla%2B/bodega_roster_lease",
@@ -111,11 +141,18 @@ fn Nav() -> Element {
                         sup { "+" }
                     }
                     a {
+                        href: "https://github.com/josehu07/summerset",
+                        target: "_blank",
+                        rel: "noopener noreferrer",
+                        "Summerset"
+                    }
+                    a {
                         href: "https://github.com/josehu07/lease-101",
                         target: "_blank",
                         rel: "noopener noreferrer",
-                        "GitHub"
+                        "Web"
                     }
+                    Link { to: Route::Sim {}, "Sim*" }
                 }
             }
         }

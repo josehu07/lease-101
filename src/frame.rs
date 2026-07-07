@@ -43,11 +43,16 @@ pub struct MsgShape {
 }
 
 /// A lease-timer bar: `fill` in `0.0..1.0` is the fraction of life remaining.
+/// The two parties' statuses are kept separate so consumers can both render
+/// them and derive counts (e.g. how many grants a node currently holds).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LeaseBar {
     pub grantor: NodeId,
     pub grantee: NodeId,
-    pub status: LeaseStatus,
+    /// Status from the grantor's viewpoint.
+    pub grantor_status: LeaseStatus,
+    /// Status from the grantee's viewpoint.
+    pub grantee_status: LeaseStatus,
     /// Remaining fraction from the grantor's viewpoint.
     pub grantor_fill: f64,
     /// Remaining fraction from the grantee's viewpoint.
@@ -74,9 +79,9 @@ pub fn ring_layout(n: usize) -> Vec<Point> {
     let r = 0.38;
     (0..n)
         .map(|i| {
-            // Start at the top and go clockwise.
-            let theta =
-                -core::f64::consts::FRAC_PI_2 + (i as f64) * core::f64::consts::TAU / (n as f64);
+            // Start at the left and go clockwise, so 2 nodes sit left/right and
+            // layouts favor a horizontal spread (node 0 is always leftmost).
+            let theta = core::f64::consts::PI + (i as f64) * core::f64::consts::TAU / (n as f64);
             Point {
                 x: 0.5 + r * theta.cos(),
                 y: 0.5 + r * theta.sin(),

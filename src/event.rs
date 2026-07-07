@@ -36,6 +36,21 @@ pub enum MsgFate {
     Dropped,
 }
 
+/// A driving command: an external, deterministic action applied to a running
+/// simulation. Either scripted on a [`Scenario`](crate::Scenario) (reproducible)
+/// or injected live via [`Engine::command`](crate::Engine::command).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    /// Grantor proactively opens (guards) a declared lease that is idle.
+    Initiate(LeaseId),
+    /// Grantor proactively revokes a lease it currently grants.
+    Revoke(LeaseId),
+    /// Force a node down (crash).
+    FailNode(NodeId),
+    /// Bring a downed node back up.
+    RecoverNode(NodeId),
+}
+
 /// Logical lease status from a single party's viewpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseStatus {

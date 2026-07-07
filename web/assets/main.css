@@ -1,7 +1,7 @@
 :root {
     --bg: #ffffff;
     --surface: #f4f5f7;
-    --text: #1c1f26;
+    --text: #000000;
     --muted: #5c6270;
     --accent: #2f6fe0;
     --border: #e2e5ea;
@@ -64,7 +64,7 @@ body {
 
 .nav-brand {
     font-weight: 600;
-    font-size: 1.3rem;
+    font-size: 1.45rem;
     color: var(--nav-text);
     text-decoration: none;
     white-space: nowrap;
@@ -112,11 +112,12 @@ body {
 
 .section h2 {
     font-size: 1.25rem;
+    font-weight: 600;
     margin: 0 0 1rem;
 }
 
 .blurb {
-    color: var(--muted);
+    color: var(--text);
     margin: 0;
 }
 
@@ -147,4 +148,712 @@ body {
     color: var(--muted);
     font-variant: small-caps;
     letter-spacing: 0.08em;
+}
+
+/* ---- Simulator playground -------------------------------------------- */
+
+.pg-root {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+
+    /* Shared side-column widths for the run bar / time axis / grant-bar rows,
+       so the slider, axis, and every bar line up on the same middle track.
+       Control = Play button + clock; status = the longest settle text. */
+    --pg-ctrl: 6.5rem;
+    --pg-status: 6.75rem;
+}
+
+/* One control row: fixed label, then the control group. */
+.pg-row {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+}
+
+.pg-label {
+    flex: 0 0 5.5rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--muted);
+}
+
+.pg-pills,
+.pg-ids {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    align-items: center;
+}
+
+/* Preset pills and id buttons share a base pill look. */
+.pg-pill,
+.pg-id {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    border-radius: 999px;
+    cursor: pointer;
+    font: inherit;
+    line-height: 1;
+    transition:
+        background 0.15s ease,
+        border-color 0.15s ease,
+        color 0.15s ease,
+        transform 0.08s ease;
+}
+
+.pg-pill {
+    padding: 0.4rem 0.85rem;
+    font-size: 0.9rem;
+}
+
+.pg-pill:hover,
+.pg-id:hover {
+    border-color: var(--accent);
+}
+
+.pg-pill:active,
+.pg-id:active {
+    transform: translateY(1px);
+}
+
+.pg-pill.is-on {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+/* Node-id toggles are compact, monospaced squares-ish pills. */
+.pg-id {
+    min-width: 2rem;
+    padding: 0.35rem 0.55rem;
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+}
+
+.pg-id.is-on {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+/* The "All" toggle sits slightly apart from the numbered ids. */
+.pg-id-all {
+    margin-left: 0.35rem;
+    font-size: 0.8rem;
+}
+
+.pg-slider {
+    flex: 1 1 auto;
+    max-width: 16rem;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.pg-readout {
+    font-size: 0.9rem;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.pg-readout strong {
+    color: var(--text);
+}
+
+/* The scenario canvas: a square-ish stage the ring is laid out in. */
+.pg-stage {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    max-height: 460px;
+    margin-top: 0.5rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+/* Gray footnote under the stage describing the fixed timing constants. */
+.pg-caption {
+    margin: 1.5rem 0 0;
+    color: var(--muted);
+    font-size: 0.85rem;
+    line-height: 1.9;
+}
+
+/* Tighten the gap between the playground's footnote and the footer's rule. */
+.pg-section {
+    padding-bottom: 1rem;
+}
+
+/* Caption ";" separator: one space of trailing room (the text is just ";"). */
+.pg-sep {
+    margin-right: 0.2rem;
+}
+
+/* A boxed, math-styled timing constant `T_name` with a subscript. */
+.pg-tconst {
+    position: relative;
+    display: inline-flex;
+    align-items: baseline;
+    padding: 0.05rem 0.3rem;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: #fff;
+    color: var(--text);
+    font-family: "Cambria Math", Cambria, Georgia, "Times New Roman", serif;
+    font-style: italic;
+    line-height: 1;
+    cursor: help;
+}
+
+.pg-tconst sub {
+    font-size: 0.7em;
+    font-style: normal;
+}
+
+/* Custom hover tooltip (native `title` is slow and unstyleable). */
+.pg-tconst::after {
+    content: attr(data-hint);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    padding: 0.3rem 0.5rem;
+    background: var(--nav-bg);
+    color: var(--nav-text);
+    border-radius: 6px;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-style: normal;
+    font-size: 0.78rem;
+    line-height: 1.3;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(16, 35, 63, 0.25);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease;
+}
+
+/* Little arrow pointing down to the box. */
+.pg-tconst::before {
+    content: "";
+    position: absolute;
+    bottom: calc(100% + 3px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    border: 5px solid transparent;
+    border-top-color: var(--nav-bg);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease;
+}
+
+.pg-tconst:hover::after,
+.pg-tconst:hover::before {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* Edges fill the stage; coordinates are in the unit box, scaled by the SVG. */
+.pg-edges {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.pg-edge {
+    stroke: var(--muted);
+    stroke-width: 0.006;
+    opacity: 0.55;
+    animation: pg-edge-in 0.25s ease both;
+}
+
+.pg-arrow-head {
+    fill: var(--muted);
+}
+
+@keyframes pg-edge-in {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 0.55;
+    }
+}
+
+/* A node disk, absolutely placed at its ring position (its center). */
+.pg-node {
+    position: absolute;
+    width: 2.6rem;
+    height: 2.6rem;
+    transform: translate(-50%, -50%);
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid var(--muted);
+    color: var(--text);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    box-shadow: 0 1px 4px rgba(16, 35, 63, 0.12);
+    /* Glide when the ring re-lays-out; pop when first added. */
+    transition:
+        left 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+        top 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+        border-color 0.15s ease,
+        background 0.15s ease;
+    animation: pg-node-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* A grantor is orange, a grantee green (mirroring Figure 2); a node that is
+   both gets a split fill. The border stays gray in every case. */
+.pg-node.is-grantor {
+    background: color-mix(in srgb, var(--grantor) 34%, #fff);
+}
+
+.pg-node.is-grantee {
+    background: color-mix(in srgb, var(--grantee) 34%, #fff);
+}
+
+.pg-node.is-grantor.is-grantee {
+    background: linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--grantor) 36%, #fff) 50%,
+        color-mix(in srgb, var(--grantee) 36%, #fff) 50%
+    );
+}
+
+.pg-node-id {
+    pointer-events: none;
+}
+
+@keyframes pg-node-in {
+    from {
+        transform: translate(-50%, -50%) scale(0.2);
+        opacity: 0;
+    }
+    to {
+        transform: translate(-50%, -50%) scale(1);
+        opacity: 1;
+    }
+}
+
+/* ---- Run bar: Play button + timeline slider + status ----------------- */
+
+/* Shared 3-column grid for the run bar, the time axis, and every grant bar, so
+   the slider / axis / bars all line up on the same middle "track" column. The
+   side columns are FIXED widths (shared via --pg-ctrl / --pg-status) — an `auto`
+   first column would size to each row's own content, so the track would start
+   at a different x on every row. The track (1fr) then takes all remaining width;
+   the status column is anchored to the longest settle text, not the current
+   message, so the slider width never shifts across phases. */
+.pg-runbar,
+.pg-timeaxis,
+.pg-grantbar-row {
+    display: grid;
+    grid-template-columns: var(--pg-ctrl) 1fr var(--pg-status);
+    column-gap: 0.85rem;
+    align-items: center;
+}
+
+.pg-runbar {
+    margin-top: 0.45rem;
+}
+
+/* Control cell: the Play button on the left, the clock glyph pushed to the
+   right so it hugs the slider's left edge. */
+.pg-runctrl {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+/* The Play button: a solid accent action button, left-aligned in the run bar. */
+.pg-btn {
+    flex: 0 0 auto;
+    padding: 0.4rem 1.1rem;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    border-radius: 999px;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 600;
+    line-height: 1;
+    transition:
+        background 0.15s ease,
+        transform 0.08s ease;
+}
+
+.pg-btn:hover:not(:disabled) {
+    background: #2a63c9;
+}
+
+.pg-btn:active:not(:disabled) {
+    transform: translateY(1px);
+}
+
+.pg-btn:disabled {
+    background: var(--border);
+    border-color: var(--border);
+    color: var(--muted);
+    cursor: not-allowed;
+}
+
+/* Status cell (fixed width): its text sits at the left of the cell, just past
+   the slider's right edge. */
+.pg-runstatus {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.pg-status {
+    font-size: 0.85rem;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+/* The idle hint ("press Play" / "select a grantor & grantee") is shown in the
+   same cell; italic to read as a hint. */
+.pg-status-hint {
+    font-style: italic;
+}
+
+
+/* A small spinning ring shown while a run is settling. */
+.pg-spinner {
+    width: 0.9rem;
+    height: 0.9rem;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: pg-spin 0.7s linear infinite;
+}
+
+@keyframes pg-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ---- Playback frame: lease edges, message dots, majority glow -------- */
+
+/* Lease edges colored by the grantee's view; opacity is set inline from the
+   remaining lease life so an active lease visibly counts down. */
+.pg-ledge {
+    stroke-width: 0.008;
+    stroke-linecap: round;
+    transition: stroke 0.15s ease;
+}
+
+.pg-ledge.is-active {
+    stroke: var(--grantee);
+}
+
+.pg-ledge.is-guarding {
+    stroke: var(--accent);
+    stroke-dasharray: 0.02 0.02;
+}
+
+.pg-ledge.is-idle {
+    stroke: var(--border);
+}
+
+/* An in-flight message: a small dot placed at its interpolated position. */
+.pg-msg {
+    position: absolute;
+    width: 0.8rem;
+    height: 0.8rem;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    box-shadow: 0 1px 3px rgba(16, 35, 63, 0.3);
+    pointer-events: none;
+    z-index: 3;
+}
+
+.pg-msg.is-guard {
+    background: var(--accent);
+}
+
+.pg-msg.is-renew {
+    background: var(--grantee);
+}
+
+.pg-msg.is-revoke {
+    background: var(--grantor);
+}
+
+/* A node currently holding a majority of leases gets a green halo. */
+.pg-node.is-majority {
+    border-color: var(--grantee);
+    box-shadow:
+        0 0 0 3px color-mix(in srgb, var(--grantee) 45%, transparent),
+        0 1px 4px rgba(16, 35, 63, 0.12);
+}
+
+/* ---- Timeline slider (the shared track column) ----------------------- */
+
+/* Clock glyph at the right of the control cell, in the accent blue. */
+.pg-timeline-icon {
+    flex: 0 0 auto;
+    width: 1.1rem;
+    height: 1.1rem;
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* The slider fills the track column; fully custom so the thumb can be a
+   vertical "tick". */
+.pg-timeline-slider {
+    width: 100%;
+    height: 1.4rem;
+    margin: 0;
+    background: transparent;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+/* Track: a dashed-tick rule evoking a measured timeline. */
+.pg-timeline-slider::-webkit-slider-runnable-track {
+    height: 6px;
+    border-radius: 3px;
+    background:
+        repeating-linear-gradient(
+            to right,
+            var(--accent) 0,
+            var(--accent) 1px,
+            transparent 1px,
+            transparent 8px
+        ),
+        color-mix(in srgb, var(--accent) 22%, var(--surface));
+}
+
+.pg-timeline-slider::-moz-range-track {
+    height: 6px;
+    border-radius: 3px;
+    background:
+        repeating-linear-gradient(
+            to right,
+            var(--accent) 0,
+            var(--accent) 1px,
+            transparent 1px,
+            transparent 8px
+        ),
+        color-mix(in srgb, var(--accent) 22%, var(--surface));
+}
+
+/* Thumb: a tall, thin vertical bar — a "tick" playhead, not a round knob. */
+.pg-timeline-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 6px;
+    height: 1.35rem;
+    margin-top: calc((6px - 1.35rem) / 2);
+    border: none;
+    border-radius: 2px;
+    background: var(--accent);
+    box-shadow: 0 1px 3px rgba(16, 35, 63, 0.35);
+}
+
+.pg-timeline-slider::-moz-range-thumb {
+    width: 6px;
+    height: 1.35rem;
+    border: none;
+    border-radius: 2px;
+    background: var(--accent);
+    box-shadow: 0 1px 3px rgba(16, 35, 63, 0.35);
+}
+
+.pg-timeline-slider:disabled {
+    cursor: default;
+    opacity: 0.4;
+}
+
+/* Time axis: on the shared grid, so its track cell lines up under the slider.
+   Sits tight under the slider row. */
+.pg-timeaxis {
+    margin-top: -0.05rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Track cell: scrub time centered (flanked by an equal-width spacer and the
+   run's end), run's end at the right. */
+.pg-axis-track {
+    display: flex;
+    align-items: baseline;
+}
+
+.pg-axis-spacer,
+.pg-axis-end {
+    flex: 1 1 0;
+}
+
+.pg-axis-end {
+    text-align: right;
+    font-size: 0.82rem;
+}
+
+.pg-time-readout {
+    flex: 0 0 auto;
+    text-align: center;
+    font-size: 0.82rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.pg-time-readout strong {
+    color: var(--text);
+}
+
+/* ---- Grant-status bars ----------------------------------------------- */
+
+/* One row per node, stacked under the timeline; each shows how many active
+   grants that node held as a grantee over the run. Rows share the run-bar grid,
+   so every bar lines up exactly with the timeline track. */
+/* Wraps the "Grants?" header and the stack of bars. Relative so the header can
+   be pinned in the left margin without shifting the bars, keeping them aligned
+   with the timeline track above. */
+.pg-grants {
+    position: relative;
+    margin-top: 0.3rem;
+}
+
+/* Header pinned to the far left, vertically centered against the whole group. */
+.pg-grants-header {
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--muted);
+}
+
+.pg-grantbars {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+/* Node-id label in the control cell, right-aligned so it hugs the track; black
+   and a touch larger for legibility. */
+.pg-grantbar-id {
+    justify-self: end;
+    font-size: 0.85rem;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+/* The bar fills the track cell, holding run-length segments left to right.
+   `overflow: visible` so a segment's hover tooltip can escape above the bar;
+   the rounded ends still read fine since the first/last segments are rounded. */
+.pg-grantbar {
+    position: relative;
+    display: flex;
+    height: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--surface);
+}
+
+/* Playhead: a thin gray vertical mark tracking the timeline slider handle,
+   extending a touch above and below the bar so it reads across all rows. */
+.pg-grantbar-cursor {
+    position: absolute;
+    top: -5px;
+    bottom: -5px;
+    width: 2px;
+    transform: translateX(-50%);
+    background: color-mix(in srgb, var(--muted) 45%, #fff);
+    border-radius: 1px;
+    pointer-events: none;
+}
+
+/* One run-length segment; flex-grow (set inline) sizes it by its frame count. */
+.pg-grantbar-seg {
+    position: relative;
+    height: 100%;
+    cursor: help;
+}
+
+/* Round the outer ends so the bar keeps its pill shape without clipping. */
+.pg-grantbar-seg:first-child {
+    border-radius: 3px 0 0 3px;
+}
+
+.pg-grantbar-seg:last-child {
+    border-radius: 0 3px 3px 0;
+}
+
+/* Custom hover tooltip, matching the `.pg-tconst` timing-constant tooltips. */
+.pg-grantbar-seg::after {
+    content: attr(data-hint);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    padding: 0.3rem 0.5rem;
+    background: var(--nav-bg);
+    color: var(--nav-text);
+    border-radius: 6px;
+    font-size: 0.78rem;
+    line-height: 1.3;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(16, 35, 63, 0.25);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease;
+}
+
+/* Little arrow pointing down to the segment. */
+.pg-grantbar-seg::before {
+    content: "";
+    position: absolute;
+    bottom: calc(100% + 3px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    border: 5px solid transparent;
+    border-top-color: var(--nav-bg);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease;
+}
+
+.pg-grantbar-seg:hover::after,
+.pg-grantbar-seg:hover::before {
+    opacity: 1;
+    visibility: visible;
+}
+
+@media (max-width: 560px) {
+    .pg-row {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.4rem;
+    }
+    .pg-label {
+        flex-basis: auto;
+    }
+    /* Narrow the fixed status column on phones so the track keeps usable width;
+       the longest message wraps within it. */
+    .pg-root {
+        --pg-status: 5rem;
+    }
+    .pg-status {
+        white-space: normal;
+    }
 }

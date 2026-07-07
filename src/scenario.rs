@@ -5,12 +5,16 @@
 
 use crate::clock::{Clock, Time};
 use crate::dist::Dist;
-use crate::event::{LeaseId, NodeId};
+use crate::event::{Command, LeaseId, NodeId};
 
 /// Lease timing parameters shared by the simulation, in ticks.
 ///
 /// Mirrors the algorithm's `t_guard`, `t_lease`, and `t_delta`. Renewals are
 /// re-sent every `renew_interval` while a lease is meant to stay active.
+///
+/// The defaults follow one fixed set of relationships, anchored on `t_delta`
+/// (`T_Δ`) and the link message delay (`T_msg ≈ 2·T_delta`):
+/// `t_lease ≈ t_guard ≈ 2.5·renew_interval`, `renew_interval ≈ 3·T_msg`.
 #[derive(Debug, Clone, Copy)]
 pub struct LeaseParams {
     pub t_guard: Time,
@@ -22,10 +26,10 @@ pub struct LeaseParams {
 impl Default for LeaseParams {
     fn default() -> Self {
         Self {
-            t_guard: 1000,
-            t_lease: 2000,
+            t_guard: 1500,
+            t_lease: 1500,
             t_delta: 100,
-            renew_interval: 1000,
+            renew_interval: 600,
         }
     }
 }
@@ -72,12 +76,14 @@ pub struct LinkConfig {
 }
 
 impl LinkConfig {
-    /// A reasonable default link between two nodes.
+    /// A reasonable default link between two nodes: one-way delay `T_msg ≈
+    /// 2·T_delta = 200` ticks, with random jitter within ±40% of that average,
+    /// reliable and connected.
     pub fn new(from: NodeId, to: NodeId) -> Self {
         Self {
             from,
             to,
-            delay: Dist::Uniform { lo: 80, hi: 160 },
+            delay: Dist::Uniform { lo: 120, hi: 280 },
             drop_chance: 0.0,
             partitioned: false,
         }
@@ -97,6 +103,9 @@ pub struct Scenario {
     pub links: Vec<LinkConfig>,
     /// Intended grantor -> grantee lease relationships to drive.
     pub leases: Vec<LeaseId>,
+    /// Scripted commands, each paired with the global time it fires at. Run in
+    /// addition to any stochastic behavior, and replay identically per seed.
+    pub commands: Vec<(Time, Command)>,
     /// How long to run, in global ticks.
     pub duration: Time,
 }
@@ -110,6 +119,7 @@ impl Scenario {
             nodes: vec![NodeConfig::default(); n],
             links: Vec::new(),
             leases: Vec::new(),
+            commands: Vec::new(),
             duration: 20_000,
         }
     }
@@ -138,6 +148,14 @@ impl Scenario {
         self
     }
 
+    /// Mutate every node's configuration in place. Handy for symmetric patterns.
+    pub fn all_nodes(mut self, f: impl Fn(&mut NodeConfig)) -> Self {
+        for n in &mut self.nodes {
+            f(n);
+        }
+        self
+    }
+
     /// Override (or add) a directed link's configuration.
     pub fn link(mut self, link: LinkConfig) -> Self {
         if let Some(existing) = self
@@ -155,6 +173,61 @@ impl Scenario {
     /// Declare an intended grantor -> grantee lease to drive.
     pub fn lease(mut self, grantor: NodeId, grantee: NodeId) -> Self {
         self.leases.push(LeaseId { grantor, grantee });
+        self
+    }
+
+    /// Declare the all-to-one pattern of leader leases: every node grants to
+    /// `leader`. The leader's own grant is implicit (counted as +1 by the
+    /// consumer, per the majority rule), so the self-lease is skipped here.
+    pub fn all_to_one(mut self, leader: NodeId) -> Self {
+        for g in 0..self.nodes.len() {
+            if g != leader {
+                self.leases.push(LeaseId {
+                    grantor: g,
+                    grantee: leader,
+                });
+            }
+        }
+        self
+    }
+
+    /// Declare the all-to-many pattern of quorum read leases: every node grants
+    /// to each holder in `holders` (a holder's grant to itself is implicit and
+    /// skipped). The holders are the configurable subset of local readers.
+    pub fn all_to_many(mut self, holders: &[NodeId]) -> Self {
+        for &h in holders {
+            for g in 0..self.nodes.len() {
+                if g != h {
+                    self.leases.push(LeaseId {
+                        grantor: g,
+                        grantee: h,
+                    });
+                }
+            }
+        }
+        self
+    }
+
+    /// Declare the all-to-all pattern of roster leases: every ordered pair of
+    /// distinct nodes gets a lease. Each node thus grants to, and holds from,
+    /// every peer.
+    pub fn all_to_all(mut self) -> Self {
+        for g in 0..self.nodes.len() {
+            for h in 0..self.nodes.len() {
+                if g != h {
+                    self.leases.push(LeaseId {
+                        grantor: g,
+                        grantee: h,
+                    });
+                }
+            }
+        }
+        self
+    }
+
+    /// Script a command to fire at global time `at`. Deterministic per seed.
+    pub fn command(mut self, at: Time, cmd: Command) -> Self {
+        self.commands.push((at, cmd));
         self
     }
 
@@ -205,6 +278,26 @@ mod tests {
         assert_eq!(l.from, 0);
         assert_eq!(l.to, 1);
         assert!(!l.partitioned);
+    }
+
+    #[test]
+    fn patterns_declare_expected_lease_counts() {
+        // Leader: every non-leader grants to the leader (self-grant implicit).
+        assert_eq!(Scenario::new(5).all_to_one(2).leases.len(), 4);
+        // Quorum: |holders| * (n - 1) leases, self-grants skipped.
+        assert_eq!(Scenario::new(5).all_to_many(&[1, 3]).leases.len(), 8);
+        // Roster: every ordered distinct pair, n * (n - 1).
+        assert_eq!(Scenario::new(4).all_to_all().leases.len(), 12);
+    }
+
+    #[test]
+    fn command_is_recorded_with_time() {
+        let id = LeaseId {
+            grantor: 0,
+            grantee: 1,
+        };
+        let s = Scenario::new(2).command(500, Command::Initiate(id));
+        assert_eq!(s.commands, vec![(500, Command::Initiate(id))]);
     }
 
     #[test]

@@ -7,8 +7,9 @@
 use dioxus::prelude::*;
 
 mod components;
+mod playground;
 
-use components::App;
+use components::Route;
 
 /// CSS bundled as a Dioxus asset so the hash-versioned URL is injected for us.
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -25,6 +26,6 @@ fn Root() -> Element {
     rsx! {
         document::Link { rel: "icon", r#type: "image/svg+xml", href: FAVICON }
         document::Stylesheet { href: MAIN_CSS }
-        App {}
+        Router::<Route> {}
     }
 }

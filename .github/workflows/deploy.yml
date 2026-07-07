@@ -38,6 +38,12 @@ jobs:
       - name: Add CNAME for custom domain
         run: echo "bodega-consensus.com" > target/dx/lease_web/release/web/public/CNAME
 
+      - name: SPA deep-link fallback
+        # GitHub Pages serves 404.html for any unmatched path. Copying the shell
+        # there lets client-side routes (e.g. /sim) survive direct hits/refreshes:
+        # the WASM boots and the router resolves the URL.
+        run: cp target/dx/lease_web/release/web/public/index.html target/dx/lease_web/release/web/public/404.html
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

@@ -1,35 +1,54 @@
 //! Discrete-event simulation engine and the one-to-one lease state machine.
 //!
 //! Global time is authoritative; each node reads it through its own clock. The
-//! engine advances by draining an internal min-heap of scheduled items
-//! (message arrivals and per-node polls) up to a requested global time,
-//! emitting a stream of timestamped [`Event`]s as side effects.
+//! engine advances by draining an internal min-heap of scheduled items (message
+//! sends, arrivals, per-node polls, and driving commands) up to a requested
+//! global time, emitting a time-ordered stream of [`Event`]s as side effects.
+//!
+//! The engine models only the *one-to-one* lease primitive over arbitrary
+//! directed grantor -> grantee pairs. The higher-level algorithms (leader,
+//! quorum, roster) are this same primitive run over different patterns plus a
+//! majority-counting rule; that counting is a derived view over lease state, not
+//! engine logic, and lives in the consumer. See `docs/design/algorithm.md`.
 
 use core::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use crate::clock::Time;
 use crate::dist::Dist;
-use crate::event::{Event, EventKind, LeaseId, LeaseStatus, MsgFate, MsgKind, NodeId};
+use crate::event::{Command, Event, EventKind, LeaseId, LeaseStatus, MsgFate, MsgKind, NodeId};
 use crate::frame::{Frame, LeaseBar, MsgShape, NodeShape, NodeViz, lerp, ring_layout};
 use crate::scenario::{LeaseParams, Scenario};
 
 /// How often each node wakes to make stochastic decisions and service leases.
 /// Per-step probabilities in the scenario are interpreted per poll.
-const POLL_INTERVAL: Time = 200;
+const POLL_INTERVAL: Time = 50;
 
 /// An item scheduled on the engine's internal timeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scheduled {
-    /// A message arrives at its destination (only enqueued if not dropped).
-    Arrival {
+    /// A node wakes up to act.
+    Poll { node: NodeId },
+    /// A message leaves its sender, after any processing delay. Deferring the
+    /// send (rather than sending inline) models reply latency and lets a node
+    /// that crashes mid-processing correctly never emit the reply.
+    Send {
         from: NodeId,
         to: NodeId,
         kind: MsgKind,
         lease_idx: usize,
     },
-    /// A node wakes up to act.
-    Poll { node: NodeId },
+    /// A message reaches its destination. `fate` decides delivery vs. drop; the
+    /// item is scheduled either way so the event stream stays time-ordered.
+    Arrival {
+        from: NodeId,
+        to: NodeId,
+        kind: MsgKind,
+        lease_idx: usize,
+        fate: MsgFate,
+    },
+    /// An external driving command takes effect.
+    Command(Command),
 }
 
 /// A heap entry ordered by ascending time, then a sequence number for a stable,
@@ -89,10 +108,9 @@ struct LeaseState {
 }
 
 /// Per-node runtime state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct NodeState {
     up: bool,
-    next_poll: Time,
 }
 
 /// A message currently traveling a link, kept for frame interpolation.
@@ -107,7 +125,7 @@ struct InFlight {
 }
 
 /// The simulation engine. Construct via [`Engine::new`], then drive it forward
-/// with [`Engine::advance_to`].
+/// with [`Engine::advance_to`], optionally injecting [`Command`]s.
 #[derive(Debug)]
 pub struct Engine {
     scenario: Scenario,
@@ -124,14 +142,12 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Build an engine from a scenario, scheduling each node's first poll.
+    /// Build an engine from a scenario, scheduling each node's first poll and
+    /// any commands scripted on the scenario.
     pub fn new(scenario: Scenario) -> Self {
         let rng = crate::rng::Rng::new(scenario.seed);
         let nodes = (0..scenario.node_count())
-            .map(|_| NodeState {
-                up: true,
-                next_poll: 0,
-            })
+            .map(|_| NodeState { up: true })
             .collect();
         let leases = scenario
             .leases
@@ -166,6 +182,10 @@ impl Engine {
         for node in 0..engine.nodes.len() {
             engine.schedule(0, Scheduled::Poll { node });
         }
+        for k in 0..engine.scenario.commands.len() {
+            let (at, cmd) = engine.scenario.commands[k];
+            engine.schedule(at, Scheduled::Command(cmd));
+        }
         engine
     }
 
@@ -179,8 +199,23 @@ impl Engine {
         self.scenario.duration
     }
 
+    /// Queue a command to take effect at the current time. It is applied on the
+    /// next [`advance_to`], whose returned events include its effects.
+    ///
+    /// [`advance_to`]: Engine::advance_to
+    pub fn command(&mut self, cmd: Command) {
+        self.schedule_command(self.now, cmd);
+    }
+
+    /// Queue a command to take effect at global time `at` (clamped to not be in
+    /// the past). Use for scripted, timed interaction.
+    pub fn schedule_command(&mut self, at: Time, cmd: Command) {
+        self.schedule(at, Scheduled::Command(cmd));
+    }
+
     /// Advance simulation up to and including global time `t`, returning the
-    /// events newly produced since the last call. Idempotent past `t`.
+    /// events newly produced since the last call, in ascending time order.
+    /// Idempotent past `t`.
     pub fn advance_to(&mut self, t: Time) -> Vec<Event> {
         let target = t.min(self.scenario.duration);
         while let Some(top) = self.queue.peek().copied() {
@@ -241,7 +276,8 @@ impl Engine {
             .map(|l| LeaseBar {
                 grantor: l.id.grantor,
                 grantee: l.id.grantee,
-                status: lease_pair_status(l.grantor.status, l.grantee.status),
+                grantor_status: l.grantor.status,
+                grantee_status: l.grantee.status,
                 grantor_fill: self.fill(l.id.grantor, l.grantor.status, l.grantor.grant_expiry, t),
                 grantee_fill: self.fill(l.id.grantee, l.grantee.status, l.grantee.hold_expiry, t),
             })
@@ -287,17 +323,26 @@ impl Engine {
     fn handle(&mut self, item: Scheduled) {
         match item {
             Scheduled::Poll { node } => self.poll(node),
+            Scheduled::Send {
+                from,
+                to,
+                kind,
+                lease_idx,
+            } => self.try_send(from, to, kind, lease_idx),
             Scheduled::Arrival {
                 from,
                 to,
                 kind,
                 lease_idx,
-            } => self.deliver(from, to, kind, lease_idx),
+                fate,
+            } => self.arrive(from, to, kind, lease_idx, fate),
+            Scheduled::Command(cmd) => self.apply(cmd),
         }
     }
 
-    /// Send a message `from -> to`, sampling delay and drop from the link. The
-    /// `MessageSent` event always fires; arrival is scheduled only if delivered.
+    /// Send a message `from -> to` now, sampling delay and drop from the link.
+    /// The `MessageSent` event fires immediately; the (delivered-or-dropped)
+    /// arrival is scheduled so its event lands in time order.
     fn send(&mut self, from: NodeId, to: NodeId, kind: MsgKind, lease_idx: usize) {
         let link = self.scenario.link_config(from, to);
         let sent = self.now;
@@ -328,19 +373,39 @@ impl Engine {
             arrival,
             fate,
         });
-        if dropped {
-            self.emit(arrival, EventKind::MessageDropped { from, to, kind });
-        } else {
-            self.schedule(
-                arrival,
-                Scheduled::Arrival {
-                    from,
-                    to,
-                    kind,
-                    lease_idx,
-                },
-            );
+        self.schedule(
+            arrival,
+            Scheduled::Arrival {
+                from,
+                to,
+                kind,
+                lease_idx,
+                fate,
+            },
+        );
+    }
+
+    /// A previously deferred send fires. Skipped if the sender is down, modeling
+    /// a node that crashed after receiving but before replying.
+    fn try_send(&mut self, from: NodeId, to: NodeId, kind: MsgKind, lease_idx: usize) {
+        if self.nodes[from].up {
+            self.send(from, to, kind, lease_idx);
         }
+    }
+
+    /// Schedule `from` to send `kind` after `from`'s own processing delay. Used
+    /// for replies, whose latency is the responder's think time.
+    fn reply_after_delay(&mut self, from: NodeId, to: NodeId, kind: MsgKind, lease_idx: usize) {
+        let delay = self.response_delay(from);
+        self.schedule(
+            self.now + delay,
+            Scheduled::Send {
+                from,
+                to,
+                kind,
+                lease_idx,
+            },
+        );
     }
 
     /// Local clock reading for a node at the current global time.
@@ -354,14 +419,84 @@ impl Engine {
         dist.sample(&mut self.rng)
     }
 
+    // ---- Driving commands -------------------------------------------------
+
+    fn apply(&mut self, cmd: Command) {
+        match cmd {
+            Command::Initiate(id) => {
+                if let Some(i) = self.lease_index(id)
+                    && self.nodes[id.grantor].up
+                    && self.grantor_idle(i)
+                {
+                    self.begin_guard(i);
+                }
+            }
+            Command::Revoke(id) => {
+                if let Some(i) = self.lease_index(id)
+                    && self.nodes[id.grantor].up
+                    && self.grantor_active_or_guarding(i)
+                {
+                    self.begin_revoke(i);
+                }
+            }
+            Command::FailNode(node) => {
+                if self.nodes[node].up {
+                    self.fail_node(node);
+                }
+            }
+            Command::RecoverNode(node) => {
+                if !self.nodes[node].up {
+                    self.recover_node(node);
+                }
+            }
+        }
+    }
+
+    fn lease_index(&self, id: LeaseId) -> Option<usize> {
+        self.leases.iter().position(|l| l.id == id)
+    }
+
+    fn grantor_idle(&self, i: usize) -> bool {
+        matches!(
+            self.leases[i].grantor.status,
+            LeaseStatus::Inactive | LeaseStatus::Expired
+        )
+    }
+
+    fn grantor_active_or_guarding(&self, i: usize) -> bool {
+        matches!(
+            self.leases[i].grantor.status,
+            LeaseStatus::Active | LeaseStatus::Guarding
+        )
+    }
+
+    // ---- Failure & recovery ----------------------------------------------
+
+    fn fail_node(&mut self, node: NodeId) {
+        self.nodes[node].up = false;
+        self.emit(self.now, EventKind::NodeFailed { node });
+        // A failed grantor stops renewing; its leases will lapse safely.
+        for l in &mut self.leases {
+            if l.id.grantor == node {
+                l.grantor.intended = false;
+            }
+        }
+    }
+
+    fn recover_node(&mut self, node: NodeId) {
+        self.nodes[node].up = true;
+        self.emit(self.now, EventKind::NodeRecovered { node });
+    }
+
     // ---- Periodic per-node poll ------------------------------------------
 
     fn poll(&mut self, node: NodeId) {
-        let up = self.nodes[node].up;
-        if up {
-            self.maybe_fail(node);
-        } else {
-            self.maybe_recover(node);
+        if self.nodes[node].up {
+            if self.rng.chance(self.scenario.nodes[node].fail_chance) {
+                self.fail_node(node);
+            }
+        } else if self.rng.chance(self.scenario.nodes[node].recover_chance) {
+            self.recover_node(node);
         }
 
         if self.nodes[node].up {
@@ -373,30 +508,7 @@ impl Engine {
         // Reschedule the next poll while the simulation is still running.
         let next = self.now + POLL_INTERVAL;
         if next <= self.scenario.duration {
-            self.nodes[node].next_poll = next;
             self.schedule(next, Scheduled::Poll { node });
-        }
-    }
-
-    fn maybe_fail(&mut self, node: NodeId) {
-        let p = self.scenario.nodes[node].fail_chance;
-        if self.rng.chance(p) {
-            self.nodes[node].up = false;
-            self.emit(self.now, EventKind::NodeFailed { node });
-            // A failed grantor stops renewing; its leases will lapse.
-            for i in 0..self.leases.len() {
-                if self.leases[i].id.grantor == node {
-                    self.leases[i].grantor.intended = false;
-                }
-            }
-        }
-    }
-
-    fn maybe_recover(&mut self, node: NodeId) {
-        let p = self.scenario.nodes[node].recover_chance;
-        if self.rng.chance(p) {
-            self.nodes[node].up = true;
-            self.emit(self.now, EventKind::NodeRecovered { node });
         }
     }
 
@@ -404,14 +516,7 @@ impl Engine {
     fn maybe_initiate(&mut self, node: NodeId) {
         let p = self.scenario.nodes[node].initiate_chance;
         for i in 0..self.leases.len() {
-            if self.leases[i].id.grantor != node {
-                continue;
-            }
-            let idle = matches!(
-                self.leases[i].grantor.status,
-                LeaseStatus::Inactive | LeaseStatus::Expired
-            );
-            if idle && self.rng.chance(p) {
+            if self.leases[i].id.grantor == node && self.grantor_idle(i) && self.rng.chance(p) {
                 self.begin_guard(i);
             }
         }
@@ -423,6 +528,15 @@ impl Engine {
         self.leases[i].grantor.status = LeaseStatus::Guarding;
         self.leases[i].grantor.intended = true;
         self.send(grantor, grantee, MsgKind::Guard, i);
+    }
+
+    /// Proactively revoke a lease: stop renewing and notify the grantee. The
+    /// grantor keeps its own outstanding `D'` and lets it lapse naturally, so
+    /// the safety invariant holds regardless of whether the grantee is reached.
+    fn begin_revoke(&mut self, i: usize) {
+        let LeaseId { grantor, grantee } = self.leases[i].id;
+        self.leases[i].grantor.intended = false;
+        self.send(grantor, grantee, MsgKind::Revoke, i);
     }
 
     /// Send due renews for leases this node grants and currently intends.
@@ -458,9 +572,13 @@ impl Engine {
         self.send(grantor, grantee, MsgKind::Renew, i);
     }
 
-    // ---- Message delivery ------------------------------------------------
+    // ---- Message arrival --------------------------------------------------
 
-    fn deliver(&mut self, from: NodeId, to: NodeId, kind: MsgKind, lease_idx: usize) {
+    fn arrive(&mut self, from: NodeId, to: NodeId, kind: MsgKind, lease_idx: usize, fate: MsgFate) {
+        if fate == MsgFate::Dropped {
+            self.emit(self.now, EventKind::MessageDropped { from, to, kind });
+            return;
+        }
         self.emit(self.now, EventKind::MessageDelivered { from, to, kind });
         // A down node silently ignores everything it receives.
         if !self.nodes[to].up {
@@ -489,10 +607,7 @@ impl Engine {
                 status: LeaseStatus::Guarding,
             },
         );
-        let delay = self.response_delay(grantee);
-        self.now += delay; // model processing latency before replying
-        self.send(grantee, grantor, MsgKind::GuardReply, i);
-        self.now -= delay;
+        self.reply_after_delay(grantee, grantor, MsgKind::GuardReply, i);
     }
 
     /// Grantor receives `GuardReply`: become active and send the first renew.
@@ -537,10 +652,7 @@ impl Engine {
                 },
             );
         }
-        let delay = self.response_delay(grantee);
-        self.now += delay;
-        self.send(grantee, grantor, MsgKind::RenewReply, i);
-        self.now -= delay;
+        self.reply_after_delay(grantee, grantor, MsgKind::RenewReply, i);
     }
 
     /// Grantor receives `RenewReply`: tighten `D' = d + t_lease + t_delta`.
@@ -613,19 +725,6 @@ impl Engine {
     }
 }
 
-/// Combine the two parties' viewpoints into a single status for display:
-/// `Active` only when both agree; otherwise the "more advanced" of the two.
-fn lease_pair_status(grantor: LeaseStatus, grantee: LeaseStatus) -> LeaseStatus {
-    use LeaseStatus::*;
-    match (grantor, grantee) {
-        (Active, Active) => Active,
-        (Guarding, _) | (_, Guarding) => Guarding,
-        (Expired, _) | (_, Expired) => Expired,
-        (Active, _) | (_, Active) => Guarding,
-        _ => Inactive,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +743,28 @@ mod tests {
             .lease(0, 1)
     }
 
+    /// Same two nodes, but driven only by explicit commands (no stochastics).
+    fn scripted() -> Scenario {
+        Scenario::new(2)
+            .seed(1)
+            .duration(10_000)
+            .link(LinkConfig::new(0, 1))
+            .link(LinkConfig::new(1, 0))
+            .lease(0, 1)
+    }
+
+    fn grantee_ever_active(events: &[Event]) -> bool {
+        events.iter().any(|ev| {
+            matches!(
+                ev.kind,
+                EventKind::GranteeLease {
+                    status: LeaseStatus::Active,
+                    ..
+                }
+            )
+        })
+    }
+
     #[test]
     fn lease_becomes_active_on_both_sides() {
         let mut e = Engine::new(basic());
@@ -657,17 +778,11 @@ mod tests {
                 }
             )
         });
-        let grantee_active = events.iter().any(|ev| {
-            matches!(
-                ev.kind,
-                EventKind::GranteeLease {
-                    status: LeaseStatus::Active,
-                    ..
-                }
-            )
-        });
         assert!(grantor_active, "grantor should activate the lease");
-        assert!(grantee_active, "grantee should hold the lease");
+        assert!(
+            grantee_ever_active(&events),
+            "grantee should hold the lease"
+        );
     }
 
     #[test]
@@ -685,6 +800,16 @@ mod tests {
         assert!(kinds.contains(&MsgKind::GuardReply));
         assert!(kinds.contains(&MsgKind::Renew));
         assert!(kinds.contains(&MsgKind::RenewReply));
+    }
+
+    #[test]
+    fn events_are_time_ordered() {
+        let mut e = Engine::new(basic());
+        let events = e.advance_to(10_000);
+        assert!(
+            events.windows(2).all(|w| w[0].at <= w[1].at),
+            "event stream must be sorted by time"
+        );
     }
 
     #[test]
@@ -718,16 +843,10 @@ mod tests {
             .lease(0, 1);
         let mut e = Engine::new(s);
         let events = e.advance_to(10_000);
-        let activated = events.iter().any(|ev| {
-            matches!(
-                ev.kind,
-                EventKind::GranteeLease {
-                    status: LeaseStatus::Active,
-                    ..
-                }
-            )
-        });
-        assert!(!activated, "partitioned grantee must never activate");
+        assert!(
+            !grantee_ever_active(&events),
+            "partitioned grantee must never activate"
+        );
     }
 
     #[test]
@@ -787,6 +906,105 @@ mod tests {
                     "real-time invariant violated: grantor {grantor_global} < grantee {grantee_global}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn command_initiate_starts_a_lease() {
+        let mut e = Engine::new(scripted());
+        // Nothing initiates on its own before the command.
+        assert!(!grantee_ever_active(&e.advance_to(1_000)));
+        e.command(Command::Initiate(LeaseId {
+            grantor: 0,
+            grantee: 1,
+        }));
+        assert!(
+            grantee_ever_active(&e.advance_to(10_000)),
+            "explicit Initiate should bring the lease up"
+        );
+    }
+
+    #[test]
+    fn command_revoke_drops_the_grantee() {
+        let id = LeaseId {
+            grantor: 0,
+            grantee: 1,
+        };
+        let mut e = Engine::new(scripted());
+        e.command(Command::Initiate(id));
+        e.advance_to(4_000);
+        e.command(Command::Revoke(id));
+        let events = e.advance_to(6_000);
+        let grantee_expired = events.iter().any(|ev| {
+            matches!(
+                ev.kind,
+                EventKind::GranteeLease {
+                    lease,
+                    status: LeaseStatus::Expired,
+                } if lease == id
+            )
+        });
+        assert!(grantee_expired, "Revoke should expire the grantee's hold");
+    }
+
+    #[test]
+    fn scripted_command_is_reproducible() {
+        let id = LeaseId {
+            grantor: 0,
+            grantee: 1,
+        };
+        let run = || {
+            let s = scripted().command(500, Command::Initiate(id));
+            Engine::new(s).advance_to(10_000)
+        };
+        assert_eq!(run(), run(), "same script + seed must replay identically");
+    }
+
+    #[test]
+    fn failed_grantor_lease_lapses() {
+        let id = LeaseId {
+            grantor: 0,
+            grantee: 1,
+        };
+        let mut e = Engine::new(scripted());
+        e.command(Command::Initiate(id));
+        e.advance_to(3_000);
+        e.command(Command::FailNode(0));
+        let events = e.advance_to(10_000);
+        assert!(
+            events
+                .iter()
+                .any(|ev| matches!(ev.kind, EventKind::NodeFailed { node: 0 })),
+            "node 0 should be reported failed"
+        );
+        // With the grantor down and not renewing, the grantee's hold expires.
+        assert!(
+            e.leases[0].grantee.status == LeaseStatus::Expired,
+            "grantee hold must lapse after grantor failure"
+        );
+    }
+
+    #[test]
+    fn all_to_all_leases_are_countable() {
+        // Three nodes, all-to-all, all initiating: each node should end up
+        // holding a majority (>= 2 of 3, counting itself) of grants.
+        let s = Scenario::new(3)
+            .seed(5)
+            .duration(20_000)
+            .all_to_all()
+            .all_nodes(|n| n.initiate_chance = 1.0);
+        let mut e = Engine::new(s);
+        e.advance_to(20_000);
+        let f = e.frame_at(e.now());
+        for node in 0..3 {
+            // Held grants toward `node`, plus 1 for the implicit self-grant.
+            let held = f
+                .leases
+                .iter()
+                .filter(|b| b.grantee == node && b.grantee_status == LeaseStatus::Active)
+                .count()
+                + 1;
+            assert!(held >= 2, "node {node} should hold a majority, held {held}");
         }
     }
 }

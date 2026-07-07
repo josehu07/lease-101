@@ -1,6 +1,6 @@
 # Project Design
 
-Overall glance of the project is in [README.md](/README.md). Detailed design docs are in the `design/` subfolder, by component.
+Detailed design docs are in the `design/` subfolder, by component.
 
 ## Components
 

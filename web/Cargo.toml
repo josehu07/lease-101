@@ -8,3 +8,5 @@ description = "Dioxus single-page static website for the Distributed Lease 101 w
 # Pinned to match the installed `dx` CLI (0.7.9); dx refuses mismatched versions.
 dioxus = { version = "=0.7.9", features = ["web", "router"] }
 lease_sim = { path = ".." }
+# Wall-clock timer for the playground's animation playback loop (WASM).
+gloo-timers = { version = "0.3", features = ["futures"] }

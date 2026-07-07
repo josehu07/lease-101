@@ -16,7 +16,7 @@ pub mod scenario;
 pub use clock::{Clock, Time};
 pub use dist::Dist;
 pub use engine::Engine;
-pub use event::{Event, EventKind, LeaseId, LeaseStatus, MsgFate, MsgKind, NodeId};
+pub use event::{Command, Event, EventKind, LeaseId, LeaseStatus, MsgFate, MsgKind, NodeId};
 pub use frame::{Frame, LeaseBar, MsgShape, NodeShape, NodeViz, Point};
 pub use rng::Rng;
 pub use scenario::{LeaseParams, LinkConfig, NodeConfig, Scenario};
