@@ -25,12 +25,14 @@ const MAX_NODES: usize = 9;
 /// the granularity the timeline slider scrubs at. Kept fine for smooth motion.
 const FRAME_TICKS: Time = 5;
 /// Wall-clock interval between generation repaints.
-const RENDER_MS: u32 = 16;
+const RENDER_MS: u32 = 18;
 /// Frames advanced per repaint while generating. Resolution stays fine
 /// (`FRAME_TICKS`) while the run still settles in a few seconds of wall clock:
 /// `FRAMES_PER_STEP · FRAME_TICKS / RENDER_MS` ticks of sim per real ms.
-const FRAMES_PER_STEP: usize = 8;
-/// Safety cap on how long a run may generate if it never settles.
+const FRAMES_PER_STEP: usize = 3;
+/// Hidden safety cap on how long a run may generate if it never settles (e.g.
+/// fewer grantors than the majority threshold). Hitting it ends the run as
+/// `Capped`.
 const MAX_TICKS: Time = 60_000;
 /// A run settles once every grantee has held a majority continuously for this
 /// many `T_expire` lifetimes.
@@ -75,7 +77,11 @@ enum Phase {
     Generating,
     /// Finished: the settle condition held. The slider now scrubs the run.
     Settled,
-    /// Finished at the [`MAX_TICKS`] cap without ever settling.
+    /// Manually stopped mid-generation via the Stop button. Like [`Phase::Settled`]
+    /// for scrubbing; just labeled as a user stop rather than an auto-settle.
+    Stopped,
+    /// Finished at the [`MAX_TICKS`] cap without ever settling — e.g. fewer
+    /// grantors than the majority threshold, so grantees can never reach it.
     Capped,
 }
 
@@ -115,12 +121,32 @@ fn edge_between(a: Point, b: Point) -> Edge {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let len = (dx * dx + dy * dy).sqrt().max(1e-6);
     let (ux, uy) = (dx / len, dy / len);
-    let inset = 0.065;
+    let tail_inset = 0.075; // start end, pulled a bit further off its node
+    let tip_inset = 0.055; // arrowhead end, at the target node's border
     Edge {
-        x1: a.x + ux * inset,
-        y1: a.y + uy * inset,
-        x2: b.x - ux * inset,
-        y2: b.y - uy * inset,
+        x1: a.x + ux * tail_inset,
+        y1: a.y + uy * tail_inset,
+        x2: b.x - ux * tip_inset,
+        y2: b.y - uy * tip_inset,
+    }
+}
+
+/// How far the arrowhead marker extends back from the tip, in unit-canvas
+/// coordinates: `(ref_x / viewBox_width) · marker_width` = `(8/10)·0.032`. The
+/// visible stem is pulled back by this much so it stops at the arrowhead's base
+/// and never shows through the (semi-transparent) head.
+const ARROW_LEN: f64 = 0.0256;
+
+/// `e` with its tip pulled back by [`ARROW_LEN`], so the drawn stem ends at the
+/// arrowhead base instead of running under the head.
+fn stem(e: Edge) -> Edge {
+    let (dx, dy) = (e.x2 - e.x1, e.y2 - e.y1);
+    let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+    let (ux, uy) = (dx / len, dy / len);
+    Edge {
+        x2: e.x2 - ux * ARROW_LEN,
+        y2: e.y2 - uy * ARROW_LEN,
+        ..e
     }
 }
 
@@ -202,6 +228,37 @@ fn grant_color(grants: usize, max: usize) -> String {
     format!("#{:02x}{:02x}{:02x}", mix(G.0), mix(G.1), mix(G.2))
 }
 
+/// Inline style for a node's green "aura" halo, sized and shaded by `frac` (the
+/// fraction of its possible grants the grantee currently holds, `0.0..1.0`) —
+/// the same ratio the grant bars shade green by. Sets two comma-free CSS custom
+/// properties the `.pg-node` `box-shadow` reads (`--aura-blur`/`--aura-spread`
+/// grow the halo, `--aura-color` deepens it); an empty string when `frac <= 0`
+/// so a node holding nothing shows no halo.
+///
+/// Comma-free on purpose: Dioxus's inline `style` parser drops any value
+/// containing a comma, so the multi-layer `box-shadow` itself lives in the
+/// stylesheet and only these scalar vars are set inline.
+fn aura_style(frac: f64) -> String {
+    if frac <= 0.0 {
+        return String::new();
+    }
+    let frac = frac.clamp(0.0, 1.0);
+    let spread = 2.0 + 2.5 * frac; // 2.0px..5.0px ring (old fixed halo was 3px)
+    let blur = 1.0 + 2.0 * frac; // 1px..3px soft glow
+    // Grantee green (#2f8f5b) mixed toward the surface (#f4f5f7), deeper green
+    // with more grants — mirroring `grant_color`.
+    const G: (f64, f64, f64) = (0x2f as f64, 0x8f as f64, 0x5b as f64);
+    const S: (f64, f64, f64) = (0xf4 as f64, 0xf5 as f64, 0xf7 as f64);
+    let green = 0.35 + 0.5 * frac; // 35%..85% green, remainder surface
+    let mix = |c: f64, s: f64| (c * green + s * (1.0 - green)).round() as u8;
+    format!(
+        "--aura-blur: {blur:.2}px; --aura-spread: {spread:.2}px; --aura-color: #{:02x}{:02x}{:02x};",
+        mix(G.0, S.0),
+        mix(G.1, S.1),
+        mix(G.2, S.2),
+    )
+}
+
 /// Build a failure-free scenario from the chosen knobs: every node initiates
 /// the leases it grants (per-poll chance, so guarding starts at a staggered
 /// random time), links are reliable, and no node fails.
@@ -244,12 +301,89 @@ fn toggle_all(mut set: Signal<BTreeSet<usize>>, n: usize) {
     }
 }
 
-/// CSS class for a message dot, grouped by protocol phase.
+/// Arrowhead marker id for a lease edge in playback, colored to match its
+/// stem: green when active/renewing, light blue while guarding, gray when idle.
+fn ledge_marker(status: LeaseStatus) -> &'static str {
+    match status {
+        LeaseStatus::Active => "url(#pg-arrow-active)",
+        LeaseStatus::Guarding => "url(#pg-arrow-guarding)",
+        _ => "url(#pg-arrow-idle)",
+    }
+}
+
+/// CSS class for a message glyph, grouped (colored) by protocol phase. Reply
+/// kinds add `is-reply`, which lightens the phase color a touch.
 fn msg_class(kind: MsgKind) -> &'static str {
     match kind {
-        MsgKind::Guard | MsgKind::GuardReply => "pg-msg is-guard",
-        MsgKind::Renew | MsgKind::RenewReply => "pg-msg is-renew",
+        MsgKind::Guard => "pg-msg is-guard",
+        MsgKind::GuardReply => "pg-msg is-guard is-reply",
+        MsgKind::Renew => "pg-msg is-renew",
+        MsgKind::RenewReply => "pg-msg is-renew is-reply",
         MsgKind::Revoke => "pg-msg is-revoke",
+    }
+}
+
+/// Whether a message is a grantee's acknowledgement reply — drawn with a small
+/// "thumbs-up" badge over its base glyph.
+fn msg_is_reply(kind: MsgKind) -> bool {
+    matches!(kind, MsgKind::GuardReply | MsgKind::RenewReply)
+}
+
+/// Opacity of an in-flight message glyph at flight `progress` (`0.0..1.0` from
+/// sender to receiver): fully opaque through the middle of the flight, fading
+/// *in* over the initial departure and *out* over the final approach — so it
+/// emerges from the sender node and vanishes right as it reaches the
+/// destination node (progress 1.0), rather than popping in/out at the borders.
+fn msg_opacity(progress: f64) -> f64 {
+    const FADE: f64 = 0.25; // fade over the first / last quarter of the flight
+    if progress < FADE {
+        (progress / FADE).clamp(0.0, 1.0)
+    } else if progress > 1.0 - FADE {
+        ((1.0 - progress) / FADE).clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// Symbol for an in-flight message, drawn inside its positioned `.pg-msg` chip:
+/// a shield for guard-phase messages, a circular "renew" arrow for renewals, a
+/// dot for revokes. Reply kinds (`*Reply`) overlay a small thumbs-up badge to
+/// mark them as acknowledgements. Colored by phase via `currentColor` (set on
+/// `.pg-msg` in CSS).
+#[component]
+fn MsgGlyph(kind: MsgKind) -> Element {
+    // Guard-phase → shield; renewals → circular refresh arrow (Material-style);
+    // revoke → a plain filled dot.
+    let base = match kind {
+        MsgKind::Guard | MsgKind::GuardReply => rsx! {
+            svg { class: "pg-msg-icon", view_box: "0 0 24 24",
+                path { d: "M12 2.2 L19.5 5.2 V11 C19.5 16 16.2 20.2 12 21.6 C7.8 20.2 4.5 16 4.5 11 V5.2 Z" }
+            }
+        },
+        MsgKind::Renew | MsgKind::RenewReply => rsx! {
+            svg { class: "pg-msg-icon", view_box: "0 0 24 24",
+                // Rotated 180° about the icon center so the head/tail gap sits
+                // at the lower left rather than the upper right.
+                path {
+                    transform: "rotate(180 12 12)",
+                    d: "M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z",
+                }
+            }
+        },
+        MsgKind::Revoke => rsx! {
+            span { class: "pg-msg-dot" }
+        },
+    };
+    rsx! {
+        {base}
+        if msg_is_reply(kind) {
+            // Thumbs-up badge, tucked at the top-right like a superscript.
+            span { class: "pg-msg-badge",
+                svg { class: "pg-msg-badge-icon", view_box: "0 0 24 24",
+                    path { d: "M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z" }
+                }
+            }
+        }
     }
 }
 
@@ -423,13 +557,26 @@ pub fn Playground() -> Element {
         }));
         phase.set(Phase::Generating);
     };
-    let scrubbable = matches!(ph, Phase::Settled | Phase::Capped);
+
+    // Stop: manually end an in-progress generation at the current frame, keeping
+    // the recorded run for scrubbing (a user-declared settle).
+    let on_stop = move |_| {
+        if *phase.peek() == Phase::Generating {
+            phase.set(Phase::Stopped);
+            engine.set(None); // recorded frames remain; free the engine
+        }
+    };
+
+    // The run button toggles Play/Stop depending on whether a run is generating.
+    let generating = ph == Phase::Generating;
+    let scrubbable = matches!(ph, Phase::Settled | Phase::Stopped | Phase::Capped);
 
     // Timeline extents and readouts, in global ticks.
     let end_ticks = (rec_len.saturating_sub(1)) as Time * FRAME_TICKS;
     let now_ticks = cur as Time * FRAME_TICKS;
 
-    // Static-editing edges (gray arrows). Playback draws from the frame instead.
+    // Static grantor → grantee arrows (gray). Drawn while editing, and also as a
+    // gray topology backdrop during playback beneath the live lease edges.
     let edges: Vec<Edge> = {
         let gset = grantors.read();
         let hset = grantees.read();
@@ -497,6 +644,22 @@ pub fn Playground() -> Element {
             .collect()
     };
 
+    // Per-node aura strength for playback: the fraction of its possible grants
+    // (`max_grants`) the node currently holds as a grantee, `0.0..1.0` — the same
+    // ratio the grant bars shade their green by. Drives the green halo's size and
+    // intensity so a node holding more grants glows larger and deeper. 0 (no
+    // grants / not a grantee) means no aura.
+    let aura: Vec<f64> = (0..n)
+        .map(|node| {
+            if max_grants[node] == 0 {
+                return 0.0;
+            }
+            let held_as_grantee =
+                current_frame.as_ref().map_or(0, |f| grant_count(f, node)) + self_grant[node];
+            (held_as_grantee as f64 / max_grants[node] as f64).clamp(0.0, 1.0)
+        })
+        .collect();
+
     rsx! {
         div { class: "pg-root",
             // Row 1: presets.
@@ -543,8 +706,16 @@ pub fn Playground() -> Element {
                 label: "Grantors",
                 n,
                 selected: grantors,
-                on_toggle: move |id| { toggle_id(grantors, id); preset.set(None); reset_sim(); },
-                on_all: move |_| { toggle_all(grantors, n); preset.set(None); reset_sim(); },
+                on_toggle: move |id| {
+                    toggle_id(grantors, id);
+                    preset.set(None);
+                    reset_sim();
+                },
+                on_all: move |_| {
+                    toggle_all(grantors, n);
+                    preset.set(None);
+                    reset_sim();
+                },
             }
 
             // Row 4: grantee selection.
@@ -552,8 +723,16 @@ pub fn Playground() -> Element {
                 label: "Grantees",
                 n,
                 selected: grantees,
-                on_toggle: move |id| { toggle_id(grantees, id); preset.set(None); reset_sim(); },
-                on_all: move |_| { toggle_all(grantees, n); preset.set(None); reset_sim(); },
+                on_toggle: move |id| {
+                    toggle_id(grantees, id);
+                    preset.set(None);
+                    reset_sim();
+                },
+                on_all: move |_| {
+                    toggle_all(grantees, n);
+                    preset.set(None);
+                    reset_sim();
+                },
             }
 
             // The canvas: static scenario while editing, animated frame otherwise.
@@ -563,14 +742,128 @@ pub fn Playground() -> Element {
                         class: "pg-edges",
                         view_box: "0 0 1 1",
                         preserve_aspect_ratio: "none",
+                        // One arrowhead marker per status, so a playback edge's
+                        // head matches its stem color (green active/renew, light
+                        // blue guarding, gray idle).
+                        defs {
+                            marker {
+                                id: "pg-arrow-active",
+                                view_box: "0 0 10 10",
+                                ref_x: "8",
+                                ref_y: "5",
+                                marker_units: "userSpaceOnUse",
+                                marker_width: "0.032",
+                                marker_height: "0.032",
+                                orient: "auto",
+                                path {
+                                    class: "pg-arrow-head is-active",
+                                    d: "M0,0 L10,5 L0,10 z",
+                                }
+                            }
+                            marker {
+                                id: "pg-arrow-guarding",
+                                view_box: "0 0 10 10",
+                                ref_x: "8",
+                                ref_y: "5",
+                                marker_units: "userSpaceOnUse",
+                                marker_width: "0.032",
+                                marker_height: "0.032",
+                                orient: "auto",
+                                path {
+                                    class: "pg-arrow-head is-guarding",
+                                    d: "M0,0 L10,5 L0,10 z",
+                                }
+                            }
+                            marker {
+                                id: "pg-arrow-idle",
+                                view_box: "0 0 10 10",
+                                ref_x: "8",
+                                ref_y: "5",
+                                marker_units: "userSpaceOnUse",
+                                marker_width: "0.032",
+                                marker_height: "0.032",
+                                orient: "auto",
+                                path {
+                                    class: "pg-arrow-head is-idle",
+                                    d: "M0,0 L10,5 L0,10 z",
+                                }
+                            }
+                            // Light-gray head for the static topology backdrop.
+                            marker {
+                                id: "pg-arrow",
+                                view_box: "0 0 10 10",
+                                ref_x: "8",
+                                ref_y: "5",
+                                marker_units: "userSpaceOnUse",
+                                marker_width: "0.032",
+                                marker_height: "0.032",
+                                orient: "auto",
+                                path {
+                                    class: "pg-arrow-head",
+                                    d: "M0,0 L10,5 L0,10 z",
+                                }
+                            }
+                        }
+                        // Static grantor → grantee topology arrows as a gray
+                        // backdrop, so the scenario's links are visible from the
+                        // start of a run — before any guard link establishes —
+                        // with the live lease edges overlaid on top.
+                        for (i , e) in edges.iter().enumerate() {
+                            {
+                                let st = stem(*e);
+                                rsx! {
+                                    line {
+                                        key: "b{i}",
+                                        class: "pg-edge",
+                                        x1: "{st.x1}",
+                                        y1: "{st.y1}",
+                                        x2: "{st.x2}",
+                                        y2: "{st.y2}",
+                                    }
+                                }
+                            }
+                        }
+                        for (i , e) in edges.iter().enumerate() {
+                            line {
+                                key: "bh{i}",
+                                class: "pg-edge-head",
+                                x1: "{e.x1}",
+                                y1: "{e.y1}",
+                                x2: "{e.x2}",
+                                y2: "{e.y2}",
+                                "marker-end": "url(#pg-arrow)",
+                            }
+                        }
+                        // Stems (pulled back to the arrowhead base), then heads
+                        // on top — so no stem shows through a translucent head.
+                        for (i , le) in lease_edges.iter().enumerate() {
+                            {
+                                let st = stem(le.e);
+                                rsx! {
+                                    line {
+                                        key: "s{i}",
+                                        class: match le.status {
+                                            LeaseStatus::Active => "pg-ledge is-active",
+                                            LeaseStatus::Guarding => "pg-ledge is-guarding",
+                                            _ => "pg-ledge is-idle",
+                                        },
+                                        x1: "{st.x1}",
+                                        y1: "{st.y1}",
+                                        x2: "{st.x2}",
+                                        y2: "{st.y2}",
+                                        opacity: match le.status {
+                                            LeaseStatus::Active => 0.4 + 0.55 * le.fill,
+                                            LeaseStatus::Guarding => 0.5,
+                                            _ => 0.1,
+                                        },
+                                    }
+                                }
+                            }
+                        }
                         for (i , le) in lease_edges.iter().enumerate() {
                             line {
-                                key: "{i}",
-                                class: match le.status {
-                                    LeaseStatus::Active => "pg-ledge is-active",
-                                    LeaseStatus::Guarding => "pg-ledge is-guarding",
-                                    _ => "pg-ledge is-idle",
-                                },
+                                key: "h{i}",
+                                class: "pg-ledge-head",
                                 x1: "{le.e.x1}",
                                 y1: "{le.e.y1}",
                                 x2: "{le.e.x2}",
@@ -580,6 +873,7 @@ pub fn Playground() -> Element {
                                     LeaseStatus::Guarding => 0.5,
                                     _ => 0.1,
                                 },
+                                "marker-end": ledge_marker(le.status),
                             }
                         }
                     }
@@ -588,7 +882,13 @@ pub fn Playground() -> Element {
                             div {
                                 key: "m{i}",
                                 class: msg_class(m.kind),
-                                style: format!("left: {:.3}%; top: {:.3}%;", m.pos.x * 100.0, m.pos.y * 100.0),
+                                style: format!(
+                                    "left: {:.3}%; top: {:.3}%; opacity: {:.3};",
+                                    m.pos.x * 100.0,
+                                    m.pos.y * 100.0,
+                                    msg_opacity(m.progress),
+                                ),
+                                MsgGlyph { kind: m.kind }
                             }
                         }
                     }
@@ -597,12 +897,23 @@ pub fn Playground() -> Element {
                             key: "{id}",
                             class: {
                                 let mut c = String::from("pg-node");
-                                if grantors.read().contains(&id) { c.push_str(" is-grantor"); }
-                                if grantees.read().contains(&id) { c.push_str(" is-grantee"); }
-                                if held[id] >= maj { c.push_str(" is-majority"); }
+                                if grantors.read().contains(&id) {
+                                    c.push_str(" is-grantor");
+                                }
+                                if grantees.read().contains(&id) {
+                                    c.push_str(" is-grantee");
+                                }
+                                if held[id] >= maj {
+                                    c.push_str(" is-majority");
+                                }
                                 c
                             },
-                            style: format!("left: {:.3}%; top: {:.3}%;", pts[id].x * 100.0, pts[id].y * 100.0),
+                            style: format!(
+                                "left: {:.3}%; top: {:.3}%; {}",
+                                pts[id].x * 100.0,
+                                pts[id].y * 100.0,
+                                aura_style(aura[id]),
+                            ),
                             span { class: "pg-node-id", "{id}" }
                         }
                     }
@@ -618,15 +929,36 @@ pub fn Playground() -> Element {
                                 ref_x: "8",
                                 ref_y: "5",
                                 marker_units: "userSpaceOnUse",
-                                marker_width: "0.05",
-                                marker_height: "0.05",
+                                marker_width: "0.032",
+                                marker_height: "0.032",
                                 orient: "auto",
-                                path { class: "pg-arrow-head", d: "M0,0 L10,5 L0,10 z" }
+                                path {
+                                    class: "pg-arrow-head",
+                                    d: "M0,0 L10,5 L0,10 z",
+                                }
                             }
                         }
-                        for e in edges {
+                        // Stems (pulled back to the arrowhead base), then heads
+                        // on top — so no stem shows through a translucent head.
+                        for (i , e) in edges.iter().enumerate() {
+                            {
+                                let st = stem(*e);
+                                rsx! {
+                                    line {
+                                        key: "s{i}",
+                                        class: "pg-edge",
+                                        x1: "{st.x1}",
+                                        y1: "{st.y1}",
+                                        x2: "{st.x2}",
+                                        y2: "{st.y2}",
+                                    }
+                                }
+                            }
+                        }
+                        for (i , e) in edges.iter().enumerate() {
                             line {
-                                class: "pg-edge",
+                                key: "h{i}",
+                                class: "pg-edge-head",
                                 x1: "{e.x1}",
                                 y1: "{e.y1}",
                                 x2: "{e.x2}",
@@ -638,15 +970,7 @@ pub fn Playground() -> Element {
                     for id in 0..n {
                         div {
                             key: "{id}",
-                            class: if grantors.read().contains(&id) && grantees.read().contains(&id) {
-                                "pg-node is-grantor is-grantee"
-                            } else if grantors.read().contains(&id) {
-                                "pg-node is-grantor"
-                            } else if grantees.read().contains(&id) {
-                                "pg-node is-grantee"
-                            } else {
-                                "pg-node"
-                            },
+                            class: if grantors.read().contains(&id) && grantees.read().contains(&id) { "pg-node is-grantor is-grantee" } else if grantors.read().contains(&id) { "pg-node is-grantor" } else if grantees.read().contains(&id) { "pg-node is-grantee" } else { "pg-node" },
                             style: format!("left: {:.3}%; top: {:.3}%;", pts[id].x * 100.0, pts[id].y * 100.0),
                             span { class: "pg-node-id", "{id}" }
                         }
@@ -659,17 +983,25 @@ pub fn Playground() -> Element {
             // line up on the same track. Control cell = Play button + clock glyph.
             div { class: "pg-runbar",
                 div { class: "pg-runctrl",
-                    button {
-                        class: "pg-btn",
-                        disabled: !runnable,
-                        onclick: on_start,
-                        "Play"
+                    // Toggles Play → Stop while a run generates; Stop manually
+                    // ends it as a user-declared settle.
+                    if generating {
+                        button {
+                            class: "pg-btn is-stop",
+                            onclick: on_stop,
+                            "Stop"
+                        }
+                    } else {
+                        button {
+                            class: "pg-btn",
+                            disabled: !runnable,
+                            onclick: on_start,
+                            "Play"
+                        }
                     }
                     // Clock glyph marks the slider as a time control; sits at the
                     // right of the control cell, hugging the slider's left edge.
-                    svg {
-                        class: "pg-timeline-icon",
-                        view_box: "0 0 24 24",
+                    svg { class: "pg-timeline-icon", view_box: "0 0 24 24",
                         circle { cx: "12", cy: "12", r: "9" }
                         path { d: "M12 7 L12 12 L15.5 14" }
                     }
@@ -691,23 +1023,32 @@ pub fn Playground() -> Element {
                     },
                 }
                 div { class: "pg-runstatus",
-                    {match ph {
-                        Phase::Generating => rsx! {
-                            span { class: "pg-spinner" }
-                            span { class: "pg-status", "settling…" }
-                        },
-                        Phase::Settled => rsx! {
-                            span { class: "pg-status", "✓ run settled" }
-                        },
-                        Phase::Capped => rsx! {
-                            span { class: "pg-status", "stopped — never settled" }
-                        },
-                        Phase::Idle => rsx! {
-                            span { class: "pg-status pg-status-hint",
-                                if runnable { "press Play" } else { "select a grantor & grantee" }
-                            }
-                        },
-                    }}
+                    {
+                        match ph {
+                            Phase::Generating => rsx! {
+                                span { class: "pg-spinner" }
+                                span { class: "pg-status", "settling…" }
+                            },
+                            Phase::Settled => rsx! {
+                                span { class: "pg-status", "✓ run settled" }
+                            },
+                            Phase::Stopped => rsx! {
+                                span { class: "pg-status", "✓ run stopped" }
+                            },
+                            Phase::Capped => rsx! {
+                                span { class: "pg-status is-error", "✗ ticks limit" }
+                            },
+                            Phase::Idle => rsx! {
+                                span { class: "pg-status pg-status-hint",
+                                    if runnable {
+                                        "press Play"
+                                    } else {
+                                        "select a grantor & grantee"
+                                    }
+                                }
+                            },
+                        }
+                    }
                 }
             }
 
@@ -737,29 +1078,29 @@ pub fn Playground() -> Element {
             div { class: "pg-grants",
                 span { class: "pg-grants-header", "Grants?" }
                 div { class: "pg-grantbars",
-                for id in 0..n {
-                    div { key: "{id}", class: "pg-grantbar-row",
-                        span { class: "pg-grantbar-id", "{id}" }
-                        div { class: "pg-grantbar",
-                            for (i , run) in bars[id].iter().enumerate() {
-                                div {
-                                    key: "{i}",
-                                    class: "pg-grantbar-seg",
-                                    style: "flex-grow: {run.frames}; background-color: {grant_color(run.grants, max_grants[id])};",
-                                    "data-hint": "{run.grants} grant{plural(run.grants)} held · {run.frames as i64 * FRAME_TICKS} ticks",
+                    for id in 0..n {
+                        div { key: "{id}", class: "pg-grantbar-row",
+                            span { class: "pg-grantbar-id", "{id}" }
+                            div { class: "pg-grantbar",
+                                for (i , run) in bars[id].iter().enumerate() {
+                                    div {
+                                        key: "{i}",
+                                        class: "pg-grantbar-seg",
+                                        style: "flex-grow: {run.frames}; background-color: {grant_color(run.grants, max_grants[id])};",
+                                        "data-hint": "{run.grants} grant{plural(run.grants)} held · {run.frames as i64 * FRAME_TICKS} ticks",
+                                    }
+                                }
+                                // Playhead marker, kept in sync with the timeline slider handle.
+                                if rec_len > 0 {
+                                    div {
+                                        class: "pg-grantbar-cursor",
+                                        style: "left: {cursor_frac * 100.0}%;",
+                                    }
                                 }
                             }
-                            // Playhead marker, kept in sync with the timeline slider handle.
-                            if rec_len > 0 {
-                                div {
-                                    class: "pg-grantbar-cursor",
-                                    style: "left: {cursor_frac * 100.0}%;",
-                                }
-                            }
+                            span {}
                         }
-                        span {}
                     }
-                }
                 }
             }
 

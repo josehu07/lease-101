@@ -5,8 +5,11 @@
     --muted: #5c6270;
     --accent: #2f6fe0;
     --border: #e2e5ea;
+    /* Light gray for the scenario edge arrows (lighter than --muted). */
+    --edge: #a7adba;
     --grantor: #d97b1a;
     --grantee: #2f8f5b;
+    --danger: #d13438;
     --max-width: 820px;
     --radius: 12px;
 
@@ -116,9 +119,165 @@ body {
     margin: 0 0 1rem;
 }
 
+/* Intro lead paragraph: a touch larger, to open the page. */
+.lead {
+    font-size: 1.08rem;
+    margin-top: 0;
+}
+
+/* Inline math-styled variable (t_Δ, ⌈n/2⌉, (Q, O), …). */
+.var {
+    font-family: "Cambria Math", Cambria, Georgia, "Times New Roman", serif;
+    font-style: italic;
+    white-space: nowrap;
+}
+
+.var sub {
+    font-size: 0.72em;
+    font-style: normal;
+}
+
+/* The progression ladder in the intro: the four rungs, tightly spaced. */
+.ladder {
+    margin: 0.5rem 0 0;
+    padding-left: 1.4rem;
+}
+
+.ladder li {
+    margin: 0.35rem 0;
+}
+
+.ladder a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.ladder a:hover {
+    text-decoration: underline;
+}
+
 .blurb {
     color: var(--text);
+    margin: 0 0 1rem;
+    font-size: 1.05rem;
+}
+
+/* ---- Algorithm sections: numbered step + pattern tag ------------------ */
+
+.algo-head {
+    display: flex;
+    /* Center the two-row title block (pattern + heading) against the ordinal. */
+    align-items: center;
+    gap: 0.85rem;
+    margin-bottom: 1.1rem;
+}
+
+/* Small ordinal (01…04) marking the rung of the ladder — muted but legible. */
+.algo-step {
+    flex: 0 0 auto;
+    font-size: 1.1rem;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+}
+
+/* Small-caps pattern label (one-to-one … all-to-all) above the heading. */
+.algo-pattern {
+    display: block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.15rem;
+}
+
+/* The algo heading sits inside the head row, so drop the Section h2 margin. */
+.algo-head h2 {
     margin: 0;
+}
+
+.algo p {
+    margin: 0 0 1rem;
+}
+
+/* ---- Safety invariant blockquote -------------------------------------- */
+
+.invariant {
+    margin: 1.2rem 0;
+    padding: 0.6rem 1.1rem;
+    border-left: 3px solid var(--grantee);
+    background: color-mix(in srgb, var(--grantee) 7%, var(--surface));
+    border-radius: 0 var(--radius) var(--radius) 0;
+    font-size: 1.05rem;
+    font-style: italic;
+    color: var(--text);
+}
+
+/* ---- Numbered phase/step list ----------------------------------------- */
+
+.steps {
+    margin: 1rem 0;
+    padding-left: 1.4rem;
+}
+
+.steps li {
+    margin: 0.55rem 0;
+    padding-left: 0.25rem;
+}
+
+/* ---- Pro / Con tradeoff pair ------------------------------------------ */
+
+.tradeoff {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.85rem;
+    margin: 1.4rem 0 0.5rem;
+}
+
+.tradeoff-pro,
+.tradeoff-con {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.85rem 1rem;
+    border-radius: var(--radius);
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+
+.tradeoff-pro {
+    background: color-mix(in srgb, var(--grantee) 9%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--grantee) 22%, var(--border));
+}
+
+.tradeoff-con {
+    background: color-mix(in srgb, var(--danger) 7%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--danger) 20%, var(--border));
+}
+
+/* Small tag ("Pro" / "Con") heading each cell. */
+.tradeoff-tag {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.tradeoff-pro .tradeoff-tag {
+    color: color-mix(in srgb, var(--grantee) 75%, #000);
+}
+
+.tradeoff-con .tradeoff-tag {
+    color: var(--danger);
+}
+
+/* ---- Simulation figure: placeholder + descriptive caption ------------- */
+
+.sim-figure {
+    margin: 1.5rem 0 0;
 }
 
 .footer {
@@ -141,13 +300,68 @@ body {
     display: grid;
     place-items: center;
     height: 320px;
-    margin-top: 1.5rem;
     background: var(--surface);
     border: 1px dashed var(--border);
     border-radius: var(--radius);
     color: var(--muted);
     font-variant: small-caps;
     letter-spacing: 0.08em;
+}
+
+/* Caption under a simulation figure: describes what the finished animation
+   will show. Reads as a muted footnote, like the playground's caption. */
+.sim-caption {
+    margin: 0.6rem 0 0;
+    color: var(--muted);
+    font-size: 0.85rem;
+    line-height: 1.6;
+}
+
+/* ---- Final recap table ------------------------------------------------ */
+
+.recap-lead {
+    margin-top: 1.6rem;
+}
+
+.recap {
+    margin-top: 0.4rem;
+    overflow-x: auto;
+}
+
+.recap-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.95rem;
+}
+
+.recap-table th,
+.recap-table td {
+    text-align: left;
+    padding: 0.55rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.recap-table thead th {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    border-bottom: 2px solid var(--border);
+}
+
+/* Second column reads as a quiet provenance tag. */
+.recap-table td:last-child {
+    color: var(--muted);
+    font-variant: small-caps;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+}
+
+/* The trait Bodega itself contributes: highlighted green. */
+.recap-table .recap-new {
+    color: color-mix(in srgb, var(--grantee) 78%, #000);
+    font-weight: 600;
 }
 
 /* ---- Simulator playground -------------------------------------------- */
@@ -366,15 +580,38 @@ body {
     height: 100%;
 }
 
+/* Light-gray edge arrows in the static editing view. */
 .pg-edge {
-    stroke: var(--muted);
+    stroke: var(--edge);
     stroke-width: 0.006;
-    opacity: 0.55;
+    opacity: 0.9;
     animation: pg-edge-in 0.25s ease both;
 }
 
+/* Static-view arrowhead: same light gray as its stem. */
 .pg-arrow-head {
-    fill: var(--muted);
+    fill: var(--edge);
+}
+
+/* Playback arrowheads, colored to match their stem status. */
+.pg-arrow-head.is-active {
+    fill: var(--grantee);
+}
+
+.pg-arrow-head.is-guarding {
+    fill: var(--accent);
+}
+
+.pg-arrow-head.is-idle {
+    fill: var(--border);
+}
+
+/* Second-pass line: no visible stem, drawn only to carry its arrowhead marker
+   on top of every first-pass stem (so no stem shows through a translucent
+   head). Opacity is set inline to match its stem. */
+.pg-edge-head,
+.pg-ledge-head {
+    stroke: none;
 }
 
 @keyframes pg-edge-in {
@@ -382,15 +619,15 @@ body {
         opacity: 0;
     }
     to {
-        opacity: 0.55;
+        opacity: 0.9;
     }
 }
 
 /* A node disk, absolutely placed at its ring position (its center). */
 .pg-node {
     position: absolute;
-    width: 2.6rem;
-    height: 2.6rem;
+    width: 2.1rem;
+    height: 2.1rem;
     transform: translate(-50%, -50%);
     display: grid;
     place-items: center;
@@ -400,13 +637,23 @@ body {
     color: var(--text);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
-    box-shadow: 0 1px 4px rgba(16, 35, 63, 0.12);
-    /* Glide when the ring re-lays-out; pop when first added. */
+    /* Green "aura" halo whose size/depth scale with grants held: the vars are
+       set inline per node during playback (see `aura_style`), and default to an
+       invisible halo so a node holding nothing shows only the base drop shadow. */
+    --aura-blur: 0px;
+    --aura-spread: 0px;
+    --aura-color: transparent;
+    box-shadow:
+        0 0 var(--aura-blur) var(--aura-spread) var(--aura-color),
+        0 1px 4px rgba(16, 35, 63, 0.12);
+    /* Glide when the ring re-lays-out; pop when first added; grow the aura
+       smoothly as grant counts change frame to frame. */
     transition:
         left 0.35s cubic-bezier(0.22, 1, 0.36, 1),
         top 0.35s cubic-bezier(0.22, 1, 0.36, 1),
         border-color 0.15s ease,
-        background 0.15s ease;
+        background 0.15s ease,
+        box-shadow 0.2s ease;
     animation: pg-node-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -506,6 +753,16 @@ body {
     cursor: not-allowed;
 }
 
+/* Stop variant, shown while a run is generating: a red action button. */
+.pg-btn.is-stop {
+    background: var(--danger);
+    border-color: var(--danger);
+}
+
+.pg-btn.is-stop:hover:not(:disabled) {
+    background: #b32a30;
+}
+
 /* Status cell (fixed width): its text sits at the left of the cell, just past
    the slider's right edge. */
 .pg-runstatus {
@@ -524,6 +781,12 @@ body {
    same cell; italic to read as a hint. */
 .pg-status-hint {
     font-style: italic;
+}
+
+/* Error status ("✗ ticks limit"): the run never settled within the tick cap. */
+.pg-status.is-error {
+    color: var(--danger);
+    font-weight: 600;
 }
 
 
@@ -559,43 +822,109 @@ body {
 
 .pg-ledge.is-guarding {
     stroke: var(--accent);
-    stroke-dasharray: 0.02 0.02;
 }
 
 .pg-ledge.is-idle {
     stroke: var(--border);
 }
 
-/* An in-flight message: a small dot placed at its interpolated position. */
+/* An in-flight message: a phase-colored glyph (shield / renew / dot) placed at
+   its interpolated position. `color` drives the glyph fill via `currentColor`;
+   the chip itself is transparent so the icon shape reads. */
 .pg-msg {
     position: absolute;
-    width: 0.8rem;
-    height: 0.8rem;
+    width: 1.8rem;
+    height: 1.8rem;
     transform: translate(-50%, -50%);
-    border-radius: 50%;
-    box-shadow: 0 1px 3px rgba(16, 35, 63, 0.3);
     pointer-events: none;
     z-index: 3;
 }
 
+/* A soft, frosted, semi-transparent backing disk so the glyph reads nicely over
+   edges, nodes, and other background graphics. Larger than the chip and sat
+   behind the icon; blurs whatever is under it. */
+.pg-msg::before {
+    content: "";
+    position: absolute;
+    inset: -18%;
+    border-radius: 50%;
+    background: rgba(150, 156, 168, 0.3);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+    box-shadow: 0 1px 4px rgba(16, 35, 63, 0.18);
+    z-index: -1;
+}
+
+/* Phase colors, darkened (mixed toward black) so the glyphs read boldly. */
 .pg-msg.is-guard {
-    background: var(--accent);
+    color: color-mix(in srgb, var(--accent) 72%, #000);
 }
 
 .pg-msg.is-renew {
-    background: var(--grantee);
+    color: color-mix(in srgb, var(--grantee) 68%, #000);
 }
 
 .pg-msg.is-revoke {
-    background: var(--grantor);
+    color: color-mix(in srgb, var(--grantor) 72%, #000);
 }
 
-/* A node currently holding a majority of leases gets a green halo. */
+/* Reply messages (guard/renew acknowledgements) are a touch lighter than their
+   request counterparts — the color drives both the symbol and the thumbs-up
+   badge via `currentColor`. */
+.pg-msg.is-guard.is-reply {
+    color: color-mix(in srgb, var(--accent) 92%, #fff);
+}
+
+.pg-msg.is-renew.is-reply {
+    color: color-mix(in srgb, var(--grantee) 90%, #fff);
+}
+
+/* The base message symbol fills the chip, filled in the phase color and lifted
+   off the surface with a soft drop shadow so it reads over edges/nodes. */
+.pg-msg-icon {
+    width: 100%;
+    height: 100%;
+    fill: currentColor;
+    filter: drop-shadow(0 1px 2px rgba(16, 35, 63, 0.35));
+}
+
+/* Revoke keeps the old filled dot, centered in the chip. */
+.pg-msg-dot {
+    display: block;
+    width: 1.15rem;
+    height: 1.15rem;
+    margin: auto;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 1px 3px rgba(16, 35, 63, 0.3);
+}
+
+/* Thumbs-up badge on reply messages, tucked at the top-right like a
+   superscript. A small white disk backs it so it stays legible over the base
+   glyph; the thumb itself is the phase color. */
+.pg-msg-badge {
+    position: absolute;
+    top: -0.28rem;
+    right: -0.36rem;
+    width: 1.05rem;
+    height: 1.05rem;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: #d3d7df;
+    box-shadow: 0 1px 2px rgba(16, 35, 63, 0.3);
+}
+
+.pg-msg-badge-icon {
+    width: 0.78rem;
+    height: 0.78rem;
+    fill: currentColor;
+}
+
+/* A node currently holding a majority of leases gets a green border. The green
+   halo itself is the adaptive aura (sized by grants held), set inline. */
 .pg-node.is-majority {
     border-color: var(--grantee);
-    box-shadow:
-        0 0 0 3px color-mix(in srgb, var(--grantee) 45%, transparent),
-        0 1px 4px rgba(16, 35, 63, 0.12);
 }
 
 /* ---- Timeline slider (the shared track column) ----------------------- */
@@ -840,6 +1169,10 @@ body {
 }
 
 @media (max-width: 560px) {
+    /* Stack the pro/con pair on narrow screens. */
+    .tradeoff {
+        grid-template-columns: 1fr;
+    }
     .pg-row {
         align-items: flex-start;
         flex-direction: column;

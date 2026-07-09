@@ -2,7 +2,7 @@
 
 The Dioxus static website for the Distributed Lease 101 walkthrough. It renders entirely client-side (WASM) and runs the `lease_sim` engine live in the browser to drive animations. See [simulator.md](simulator.md) for the engine and [algorithm.md](algorithm.md) for the algorithms being illustrated.
 
-Two client-side routes share one banner: the home walkthrough (`/`) and a standalone simulator playground (`/sim`).
+Two client-side routes share one banner: the home walkthrough (`/`) and a standalone simulator playground (`/sim`). Each route sets the browser-tab title via `document::Title` — the base `"Bodega Consensus"` on `/`, and `"Bodega Consensus — Lease Sim Playground"` on `/sim`.
 
 ## Goals
 
@@ -42,44 +42,48 @@ The web app depends on the `lease_sim` core via a path dependency, so the same e
 A sticky dark-blue top banner (shared across routes) over a vertical stack of sections inside a centered column (`max-width ~820px`):
 
 1. **Banner** — "Bodega Consensus" brand on the left (an internal `Link` home); external links (Paper, TLA+, Summerset, Web) plus the internal `Sim*` route link on the right. Full-bleed background, content capped to the body width.
-2. **Home (`/`)** — intro (what a lease is: grantor/grantee, time-bounded promise), then **one algorithm section per level**, mirroring [algorithm.md](algorithm.md): one-to-one, leader, quorum, and roster leases. Each has a blurb and a live simulation animation (currently a `SimPlaceholder`; wired to `lease_sim` next).
+2. **Home (`/`)** — a progressive, blog-post-style walkthrough of the lease algorithms, mirroring [algorithm.md](algorithm.md). An intro establishes the lease primitive (grantor/grantee, time-bounded promise) and previews the four-rung *ladder*, then **one section per level** climbs it — one-to-one → leader → quorum → roster — each motivated by the limitation of the rung beneath it. Every algorithm section carries bespoke prose (a blurb, a safety-invariant blockquote, numbered `steps`, a `Tradeoff` pro/con motivating the next rung) plus a `SimFigure` — a captioned `SimPlaceholder` describing the live animation to be wired to `lease_sim` next. The roster section closes with a `RecapTable` showing how each accumulated trait lands in Bodega.
 3. **Sim (`/sim`)** — a standalone simulator playground. Scenario-setup controls (preset, node count, grantor/grantee selection) sit over a canvas, with playback controls and a scrubbable timeline below. See [Simulator playground](#simulator-playground).
 
-The home section list is data-driven (a `SectionMeta` slice), so the sections stay in sync from one source.
+The walkthrough prose is authored per level (not data-driven), so each section reads as its own smooth passage rather than a uniform template.
 
 ## Components
 
 - `Root` — top-level; injects the global stylesheet asset, then mounts `Router::<Route>`.
 - `Route` — the routable enum: `Home {}` at `/` and `Sim {}` at `/sim`, both nested under the `Shell` layout.
 - `Shell` — layout wrapping every route: renders `Nav`, then the active route via `Outlet`.
-- `Home` — the walkthrough page: the intro, then one `Section` per entry in `ALGO_SECTIONS`.
+- `Home` — the walkthrough page: the intro `Section`, then one `AlgoSection` per algorithm level.
 - `Sim` — the standalone simulator playground page; hosts `Playground`.
 - `Playground` — the interactive scenario builder + live simulation (in `playground.rs`). See [Simulator playground](#simulator-playground).
 - `Nav` — sticky dark-blue banner: "Bodega Consensus" brand on the left, external links (Paper, TLA+, Summerset, Web) and the `Sim*` route link on the right.
-- `Section { id, title, children }` — reusable anchored section with a heading.
-- `SimPlaceholder` — stand-in for the WASM-driven simulation canvas (still used on the home walkthrough sections).
-- `ALGO_SECTIONS` — a `SectionMeta` slice (id, title, blurb) that drives the home section bodies.
+- `Section { id, title, children }` — reusable anchored section with a heading (used for the intro).
+- `AlgoSection { id, step, pattern, title, children }` — an algorithm-level section: a big faint ordinal (`01`–`04`) and a small-caps pattern tag (`one-to-one` … `all-to-all`) in the heading, over the level's prose and figure.
+- `Tradeoff { pro, con }` — the pro/con pair that motivates the next rung.
+- `SimFigure { caption }` — a `SimPlaceholder` under a `figcaption` describing the live animation to come.
+- `RecapTable` — the closing table mapping each accumulated trait to the rung it first appeared on.
+- `SimPlaceholder` — stand-in for the WASM-driven simulation canvas (wrapped by `SimFigure` on the home sections).
 
 All external links open in a new tab (`target="_blank"` with `rel="noopener noreferrer"`).
 
 ## Simulator playground
 
-The `Playground` component (`web/src/playground.rs`) is a self-contained scenario builder and live animation over the `lease_sim` engine, driven by a four-state `Phase`:
+The `Playground` component (`web/src/playground.rs`) is a self-contained scenario builder and live animation over the `lease_sim` engine, driven by a five-state `Phase`:
 
-- **`Idle`** (editing) — the default. The controls (preset pills, node-count slider, grantor/grantee toggles) define a *scenario shape*, drawn statically on the canvas as gray directed grantor → grantee arrows. Changing any knob returns to this state.
-- **`Generating`** — entered by pressing **Start**. The current knobs build a `Scenario` and the engine is advanced *live*, one frame per wall-clock tick, animating the messages and lease timers as the cluster settles.
+- **`Idle`** (editing) — the default. The controls (preset pills, node-count slider, grantor/grantee toggles) define a *scenario shape*, drawn statically on the canvas as light-gray directed grantor → grantee arrows. Changing any knob returns to this state.
+- **`Generating`** — entered by pressing **Play**. The current knobs build a `Scenario` and the engine is advanced *live*, one frame per wall-clock tick, animating the messages and lease timers as the cluster settles.
 - **`Settled`** — the settle condition held; generation stops and the recorded frames stay put for free scrubbing.
-- **`Capped`** — generation hit the `MAX_TICKS` cap without ever settling.
+- **`Stopped`** — the user pressed **Stop** mid-generation, a manual settle. Scrubbable like `Settled`, just labeled as a user stop.
+- **`Capped`** — generation hit the `MAX_TICKS` cap without ever settling (e.g. fewer grantors than the majority threshold, so grantees can never reach it).
 
 ### Live generation model
 
-The run is generated **incrementally on a wall-clock loop**, not computed all at once — advancing the engine live is what makes the settling *visible*, and keeping every frame is what lets the user scrub freely afterward. A single `use_future` loop ticks every `RENDER_MS` (16 ms); while the phase is `Generating`, each tick advances a batch of `FRAMES_PER_STEP` (8) frames, and for each frame it:
+The run is generated **incrementally on a wall-clock loop**, not computed all at once — advancing the engine live is what makes the settling *visible*, and keeping every frame is what lets the user scrub freely afterward. A single `use_future` loop ticks every `RENDER_MS` (18 ms); while the phase is `Generating`, each tick advances a batch of `FRAMES_PER_STEP` (3) frames, and for each frame it:
 
 1. advances the shared `Engine` to the next global time `t` (`+FRAME_TICKS` = 5 ticks per frame — a fine resolution for smooth motion and scrubbing) and snapshots `frame_at(t)` into a `Vec<Frame>`;
 2. updates per-node majority-hold tracking (`major_since`): a node holds a majority when its `Active` grants plus its implicit self-grant are `≥ ⌈n/2⌉`, and the timestamp resets whenever it drops below;
-3. checks the **settle condition** — every selected grantee has *continuously* held a majority for at least `SETTLE_MULT·T_expire` (`2·T_expire`) — and on success (or hitting `MAX_TICKS`) transitions to `Settled`/`Capped` and drops the engine, leaving the frames.
+3. checks the **settle condition** — every selected grantee has *continuously* held a majority for at least `SETTLE_MULT·T_expire` (`2·T_expire`) — and on success (or hitting the hidden `MAX_TICKS` = 60000 cap) transitions to `Settled`/`Capped` and drops the engine, leaving the frames.
 
-Batching the fine-grained frames per repaint decouples time *resolution* (`FRAME_TICKS`) from wall-clock *pace*: at 5 ticks/frame × 8 frames per 16 ms, a typical run settles in ~1.5 s while recording ~700 frames.
+Batching the fine-grained frames per repaint decouples time *resolution* (`FRAME_TICKS`) from wall-clock *pace*: at 5 ticks/frame × 3 frames per 18 ms, a typical run settles in ~4.5 s while recording ~700 frames.
 
 `build_scenario` produces a failure-free `Scenario`: every node eagerly initiates the leases it grants (`initiate_chance = 1.0`), reliable links, no crashes, fixed seed. Per-run bookkeeping (`t`, `major_since`, threshold, settle window, grantee set) lives in a `GenState` signal.
 
@@ -87,9 +91,9 @@ Batching the fine-grained frames per repaint decouples time *resolution* (`FRAME
 
 A single row under the canvas holds the whole run lifecycle:
 
-- **"Run" label** (hugging the button), then the **Play** button, which (re)builds the scenario and starts a fresh live generation. Disabled when the scenario declares no lease (no grantor/grantee pair).
+- **"Run" label** (hugging the button), then the **Play** button, which (re)builds the scenario and starts a fresh live generation. Disabled when the scenario declares no lease (no grantor/grantee pair). While generating it toggles to a red **Stop** button that ends the run at the current frame (`Stopped`).
 - The **timeline slider** grows to fill the row. It is *inert* while editing and generating (disabled), and becomes freely scrubbable — bound to the frame `cursor` — once the run finishes. During generation the cursor auto-follows the newest frame.
-- A **status** area on the right: a spinner + "settling…" while generating, a green "✓ run settled" when done, "stopped — never settled" if capped, or an editing hint while idle.
+- A **status** area on the right: a spinner + "settling…" while generating, a gray "✓ run settled" when auto-settled, a gray "✓ run stopped" when stopped by the user, a red "✗ ticks limit" if capped, or an editing hint while idle.
 
 Below the row, a compact **time axis** shows the run's start (`0`), the current scrub time (`t = … ticks`), and the end.
 
@@ -97,18 +101,19 @@ Below the row, a compact **time axis** shows the run's start (`0`), the current 
 
 Both modes lay nodes out with `frame::ring_layout`. When frames exist the canvas is driven by the current `Frame`:
 
-- **Lease edges** colored by the grantee's view — green `Active` (opacity tracks remaining lease life for a visible countdown), accent dashed `Guarding`, faint otherwise.
-- **Message dots** at each in-flight message's interpolated `pos`, colored by phase (guard/renew/revoke).
-- **Node glow** — a green halo on any node currently holding a majority.
+- **Topology backdrop** — the same gray grantor → grantee arrows as the static editing view, drawn beneath the live lease edges so the scenario's links are visible from the very start of a run, before any guard link establishes.
+- **Lease edges** are directed arrows (like the static view) colored by the grantee's view — green `Active` (opacity tracks remaining lease life for a visible countdown), solid light-blue `Guarding`, faint gray otherwise; each arrowhead matches its stem color. Every stem is pulled back to the arrowhead base and heads are drawn in a second pass, so no stem shows through a translucent head.
+- **Message glyphs** at each in-flight message's interpolated `pos`, colored by phase (guard blue / renew green / revoke orange, darkened for contrast) via `MsgGlyph`: a shield for guard-phase messages, a circular "renew" arrow for renewals, a dot for revokes. Reply kinds (`GuardReply`/`RenewReply`) overlay a small thumbs-up badge marking them as acknowledgements and are tinted a touch lighter than their request counterparts. Each glyph sits on a frosted, semi-transparent backing disk so it reads over the edges and nodes beneath it, and fades in over its initial departure and out over its final approach (`msg_opacity` on flight `progress`) so it emerges from the sender node and vanishes just as it reaches the destination node, rather than popping in/out at the borders.
+- **Node aura** — a green halo on any grantee currently holding grants, whose size and depth scale with the fraction of its possible grants held (mirroring the grant bars' green shading); set inline per node via `aura_style`. A node holding a majority additionally gets a green border.
 
 ### Constants
 
 | Const | Meaning | Value |
 | --- | --- | --- |
 | `FRAME_TICKS` | ticks per recorded frame (resolution + scrub granularity) | 5 |
-| `RENDER_MS` | wall-clock ms between generation repaints | 16 |
-| `FRAMES_PER_STEP` | frames advanced per repaint while generating | 8 |
-| `MAX_TICKS` | cap on run length if it never settles | 60000 |
+| `RENDER_MS` | wall-clock ms between generation repaints | 18 |
+| `FRAMES_PER_STEP` | frames advanced per repaint while generating | 3 |
+| `MAX_TICKS` | hidden cap on run length if it never settles | 60000 |
 | `SETTLE_MULT` | continuous majority-hold window, in `T_expire` | 2 |
 
 `gloo-timers` (feature `futures`) provides the async `sleep` backing the generation loop on WASM.
