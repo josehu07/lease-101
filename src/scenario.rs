@@ -5,7 +5,7 @@
 
 use crate::clock::{Clock, Time};
 use crate::dist::Dist;
-use crate::event::{Command, LeaseId, NodeId};
+use crate::event::{Command, LeaseId, MsgKind, NodeId};
 
 /// Lease timing parameters shared by the simulation, in ticks.
 ///
@@ -103,11 +103,23 @@ pub struct Scenario {
     pub links: Vec<LinkConfig>,
     /// Intended grantor -> grantee lease relationships to drive.
     pub leases: Vec<LeaseId>,
+    /// Extra drop probability applied per message *kind*, indexed by
+    /// [`MsgKind::index`]. Layered on top of a link's own `drop_chance`, so a
+    /// caller can e.g. fail all `Guard`s without touching link reliability.
+    pub kind_drop: [f64; MsgKind::COUNT],
     /// Scripted commands, each paired with the global time it fires at. Run in
     /// addition to any stochastic behavior, and replay identically per seed.
     pub commands: Vec<(Time, Command)>,
     /// How long to run, in global ticks.
     pub duration: Time,
+    /// Average interval (global ticks) between leader write requests, or `None`
+    /// to never issue writes. Each round waits this long ± a small jitter.
+    pub write_interval: Option<Time>,
+    /// Whether writes are *disruptive*: if set, a write suspends the read leases
+    /// each node holds until it commits, then lets them re-activate; if unset,
+    /// writes leave leases entirely untouched (see the engine's write path).
+    /// Ignored when `write_interval` is `None`.
+    pub write_disruptive: bool,
 }
 
 impl Scenario {
@@ -119,8 +131,11 @@ impl Scenario {
             nodes: vec![NodeConfig::default(); n],
             links: Vec::new(),
             leases: Vec::new(),
+            kind_drop: [0.0; MsgKind::COUNT],
             commands: Vec::new(),
             duration: 20_000,
+            write_interval: None,
+            write_disruptive: false,
         }
     }
 
@@ -173,6 +188,21 @@ impl Scenario {
     /// Declare an intended grantor -> grantee lease to drive.
     pub fn lease(mut self, grantor: NodeId, grantee: NodeId) -> Self {
         self.leases.push(LeaseId { grantor, grantee });
+        self
+    }
+
+    /// Set the extra drop probability for one message `kind`, on top of any
+    /// per-link `drop_chance`. `p` is clamped to `[0, 1]`.
+    pub fn kind_drop(mut self, kind: MsgKind, p: f64) -> Self {
+        self.kind_drop[kind.index()] = p.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Configure the leader's write cadence: `interval` average global ticks
+    /// between writes (`None` to disable), and whether writes are `disruptive`.
+    pub fn writes(mut self, interval: Option<Time>, disruptive: bool) -> Self {
+        self.write_interval = interval;
+        self.write_disruptive = disruptive;
         self
     }
 

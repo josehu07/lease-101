@@ -3,19 +3,19 @@
 //!
 //! A `Play` press builds a [`Scenario`] from the current knobs and *generates*
 //! the run live: the `lease_sim` engine is advanced [`FRAME_TICKS`] ticks per
-//! wall-clock step, each step recording a `Frame` and animating on the canvas,
-//! until every selected grantee has held a majority of leases for at least
-//! `SETTLE_MULT·T_expire` (failure-free for now). While it settles the timeline
-//! slider is inert and a spinner shows; once settled, the whole recorded run
-//! stays put and the slider freely scrubs it. Any change to a scenario knob
-//! discards the run and returns the canvas to static editing.
+//! wall-clock step, each step recording a `Frame` and animating on the canvas.
+//! The run keeps playing until the user pauses it or it reaches the [`MAX_TICKS`]
+//! cap. While running the timeline slider is inert and a spinner shows; once
+//! paused (or capped) the whole recorded run stays put and the slider freely
+//! scrubs it, and a paused run can be resumed from where it left off. Any change
+//! to a scenario knob discards the run and returns the canvas to static editing.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
 use dioxus::prelude::*;
-use lease_sim::frame::ring_layout;
-use lease_sim::{Engine, Frame, LeaseStatus, MsgKind, NodeId, Point, Scenario, Time};
+use lease_sim::frame::{lerp, ring_layout};
+use lease_sim::{Engine, Frame, LeaseStatus, MsgFate, MsgKind, NodeId, Point, Scenario, Time};
 
 /// Node-count bounds for the slider.
 const MIN_NODES: usize = 2;
@@ -24,24 +24,97 @@ const MAX_NODES: usize = 9;
 /// Global ticks between recorded frames — the time resolution of the run and
 /// the granularity the timeline slider scrubs at. Kept fine for smooth motion.
 const FRAME_TICKS: Time = 5;
-/// Wall-clock interval between generation repaints.
-const RENDER_MS: u32 = 18;
-/// Frames advanced per repaint while generating. Resolution stays fine
-/// (`FRAME_TICKS`) while the run still settles in a few seconds of wall clock:
-/// `FRAMES_PER_STEP · FRAME_TICKS / RENDER_MS` ticks of sim per real ms.
-const FRAMES_PER_STEP: usize = 3;
-/// Hidden safety cap on how long a run may generate if it never settles (e.g.
-/// fewer grantors than the majority threshold). Hitting it ends the run as
-/// `Capped`.
+/// Wall-clock interval between generation repaints (~83 fps). Paired with
+/// `FRAMES_PER_STEP = 1` so exactly one recorded frame is painted per repaint —
+/// the smoothest possible display at the current `FRAME_TICKS` resolution
+/// (repainting faster would only re-show duplicate frames). The recorded frames
+/// (and thus the scrubbable run) are unaffected; only the live-generation
+/// wall-clock cadence changes.
+const RENDER_MS: u32 = 12;
+/// Frames advanced per repaint while generating. One frame per repaint keeps
+/// display and sim resolution in lockstep; playback speed is
+/// `FRAMES_PER_STEP · FRAME_TICKS / RENDER_MS` ticks of sim per real ms, held at
+/// `1·5/12 = 5/12` (unchanged from the prior `3·5/36`).
+const FRAMES_PER_STEP: usize = 1;
+/// Frames-per-repaint multiplier applied while the fast-forward toggle is on:
+/// the loop advances `FRAMES_PER_STEP · FF_MULT` frames per repaint, playing the
+/// run (and its animation) that many times faster.
+const FF_MULT: usize = 3;
+/// Cap on how long a run may play. A run keeps generating until the user pauses
+/// it or it reaches this many ticks; hitting the cap ends the run as `Capped`.
 const MAX_TICKS: Time = 60_000;
-/// A run settles once every grantee has held a majority continuously for this
-/// many `T_expire` lifetimes.
-const SETTLE_MULT: Time = 2;
 
-/// A starting-point scenario shape, mirroring the four algorithm levels.
+/// A drop-rate choice for a message kind: never, rarely, sometimes, or always.
+/// The selectable failure levels for the Guard / Renew failure switches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailRate {
+    Off,
+    Tiny,
+    Low,
+    Some,
+    All,
+}
+
+impl FailRate {
+    /// The drop probability this rate applies to its message kind.
+    fn prob(self) -> f64 {
+        match self {
+            FailRate::Off => 0.0,
+            FailRate::Tiny => 0.01,
+            FailRate::Low => 0.10,
+            FailRate::Some => 0.30,
+            FailRate::All => 1.0,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            FailRate::Off => "Off",
+            FailRate::Tiny => "1%",
+            FailRate::Low => "10%",
+            FailRate::Some => "30%",
+            FailRate::All => "100%",
+        }
+    }
+}
+
+/// How often the leader serves a write request: never, or on an average
+/// interval (± jitter). The selectable values for the "Every" write switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteEvery {
+    Never,
+    Slow,
+    Mid,
+    Fast,
+}
+
+impl WriteEvery {
+    /// The average write interval in ticks, or `None` to never write.
+    fn interval(self) -> Option<Time> {
+        match self {
+            WriteEvery::Never => None,
+            WriteEvery::Slow => Some(3000),
+            WriteEvery::Mid => Some(1000),
+            WriteEvery::Fast => Some(300),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            WriteEvery::Never => "Never",
+            WriteEvery::Slow => "3000 ticks",
+            WriteEvery::Mid => "1000 ticks",
+            WriteEvery::Fast => "300 ticks",
+        }
+    }
+}
+
+/// A starting-point scenario shape: the four algorithm levels plus a small
+/// lease-manager topology (one grantor fanning out to several grantees).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Preset {
     OneToOne,
+    LeaseManager,
     Leader,
     Quorum,
     Roster,
@@ -52,15 +125,30 @@ impl Preset {
     fn expand(self) -> (usize, Vec<usize>, Vec<usize>) {
         match self {
             Preset::OneToOne => (2, vec![0], vec![1]),
+            Preset::LeaseManager => (4, vec![0], vec![1, 2, 3]),
             Preset::Leader => (5, (0..5).collect(), vec![0]),
             Preset::Quorum => (5, (0..5).collect(), vec![1, 3]),
             Preset::Roster => (5, (0..5).collect(), (0..5).collect()),
         }
     }
 
+    /// The failure/write switch settings this preset presents:
+    /// `(guard_fail, renew_fail, write_every, write_disruptive)`. Every preset
+    /// uses a 1% Guard/Renew drop; they differ only in write cadence/mode.
+    fn switches(self) -> (FailRate, FailRate, WriteEvery, bool) {
+        match self {
+            Preset::OneToOne => (FailRate::Tiny, FailRate::Tiny, WriteEvery::Never, false),
+            Preset::LeaseManager => (FailRate::Tiny, FailRate::Tiny, WriteEvery::Never, false),
+            Preset::Leader => (FailRate::Tiny, FailRate::Tiny, WriteEvery::Slow, false),
+            Preset::Quorum => (FailRate::Tiny, FailRate::Tiny, WriteEvery::Slow, true),
+            Preset::Roster => (FailRate::Tiny, FailRate::Tiny, WriteEvery::Slow, false),
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Preset::OneToOne => "One-to-One",
+            Preset::LeaseManager => "Lease Manager",
             Preset::Leader => "Leader Leases",
             Preset::Quorum => "Quorum Leases",
             Preset::Roster => "Roster Leases",
@@ -73,15 +161,12 @@ impl Preset {
 enum Phase {
     /// No run; the canvas shows the static scenario and knobs are editable.
     Idle,
-    /// A run is being generated live (settling animation playing out).
+    /// A run is being generated live (the simulation is playing out).
     Generating,
-    /// Finished: the settle condition held. The slider now scrubs the run.
-    Settled,
-    /// Manually stopped mid-generation via the Stop button. Like [`Phase::Settled`]
-    /// for scrubbing; just labeled as a user stop rather than an auto-settle.
-    Stopped,
-    /// Finished at the [`MAX_TICKS`] cap without ever settling — e.g. fewer
-    /// grantors than the majority threshold, so grantees can never reach it.
+    /// Paused mid-generation via the Pause button. Scrubbable, and resumable —
+    /// pressing Resume continues generating from where it left off.
+    Paused,
+    /// Finished at the [`MAX_TICKS`] cap. The slider now scrubs the run.
     Capped,
 }
 
@@ -90,19 +175,21 @@ enum Phase {
 struct GenState {
     /// Global time of the next frame to generate.
     t: Time,
-    /// Global time each node most recently reached majority (reset on a drop).
-    major_since: Vec<Option<Time>>,
-    /// Majority threshold for this run.
-    maj: usize,
-    /// Continuous-hold window required to settle, in ticks.
-    settle: Time,
-    /// The grantees whose settling terminates the run.
-    grantees: BTreeSet<usize>,
 }
 
 /// Strict majority (quorum-intersection threshold) for a cluster of size `n`.
 fn majority(n: usize) -> usize {
     n / 2 + 1
+}
+
+/// A fresh random seed for a run, drawn from the browser's `Math.random()`. The
+/// engine is deterministic *given* a seed; picking a new one per Play is what
+/// makes each run's stochastic drops/timings differ. The two random draws fill
+/// the low and high 32 bits so the whole `u64` seed space is reachable.
+fn fresh_seed() -> u64 {
+    let hi = (js_sys::Math::random() * (1u64 << 32) as f64) as u64;
+    let lo = (js_sys::Math::random() * (1u64 << 32) as f64) as u64;
+    (hi << 32) | lo
 }
 
 /// A directed lease edge in unit-canvas coordinates, endpoints pulled in so the
@@ -161,7 +248,8 @@ struct LeaseEdge {
 
 /// One run-length run of a node's grant history: the node held `grants` active
 /// grants as a grantee for `frames` consecutive recorded frames. Built up
-/// append-only as the simulation generates, so completed runs never change.
+/// append-only as the simulation generates, so completed runs never change. A
+/// new run begins whenever the grant count changes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct GrantRun {
     frames: usize,
@@ -180,8 +268,8 @@ fn grant_count(f: &Frame, node: NodeId) -> usize {
 /// `base` is the node's implicit self-grant (1 if it grants to itself, i.e. it
 /// is both a grantor and a grantee — such a node always holds that 1), added on
 /// top of the grants it holds from others. Derived from `frames` (the single
-/// source of truth that persists after a run settles), so bars stay put once
-/// generation stops.
+/// source of truth that persists once a run stops), so bars stay put after
+/// generation ends.
 fn grant_runs(frames: &[Frame], node: NodeId, base: usize) -> Vec<GrantRun> {
     // Before any run exists, still show the node's standing self-grant (`base`)
     // as a single full-width segment, so a self-grantor's bar is colored the
@@ -208,10 +296,9 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-/// CSS color for a grant-status run, as a plain comma-free hex string. When no
-/// grant is held it matches the empty track (`--surface` = #f4f5f7); otherwise
-/// it's a green (`--grantee` = #2f8f5b) mixed toward white, deepening with how
-/// many of the node's possible grants (`max`) are held.
+/// CSS color for a grant-status run, as a plain comma-free hex string: an empty
+/// track (`--surface`) when no grant is held, else grantee green mixed toward
+/// white, deepening with how many of the node's possible grants (`max`) are held.
 ///
 /// Returns hex (not `color-mix(...)`/`var(...)`) on purpose: Dioxus's inline
 /// `style` string parser drops values containing commas, so a `color-mix` or
@@ -220,12 +307,15 @@ fn grant_color(grants: usize, max: usize) -> String {
     if grants == 0 || max == 0 {
         return "#f4f5f7".to_string(); // matches --surface (empty track)
     }
+    let hex = |c: (f64, f64, f64), amt: f64, toward: f64| {
+        let mix = |x: f64| (x * amt + toward * (1.0 - amt)).round() as u8;
+        format!("#{:02x}{:02x}{:02x}", mix(c.0), mix(c.1), mix(c.2))
+    };
     // Grantee green (#2f8f5b) mixed toward white; deeper with more grants.
     const G: (f64, f64, f64) = (0x2f as f64, 0x8f as f64, 0x5b as f64);
     let frac = (grants as f64 / max as f64).clamp(0.0, 1.0);
     let green = 0.30 + 0.55 * frac; // 30%..85% green, remainder white
-    let mix = |c: f64| (c * green + 255.0 * (1.0 - green)).round() as u8;
-    format!("#{:02x}{:02x}{:02x}", mix(G.0), mix(G.1), mix(G.2))
+    hex(G, green, 255.0)
 }
 
 /// Inline style for a node's green "aura" halo, sized and shaded by `frac` (the
@@ -259,14 +349,29 @@ fn aura_style(frac: f64) -> String {
     )
 }
 
-/// Build a failure-free scenario from the chosen knobs: every node initiates
-/// the leases it grants (per-poll chance, so guarding starts at a staggered
-/// random time), links are reliable, and no node fails.
-fn build_scenario(n: usize, grantors: &BTreeSet<usize>, grantees: &BTreeSet<usize>) -> Scenario {
+/// Build a scenario from the chosen knobs: every node initiates the leases it
+/// grants (per-poll chance, so guarding starts at a staggered random time),
+/// links have no baseline loss, and no node fails. The Guard / Renew failure
+/// switches inject a per-kind drop probability on top, and the write switches
+/// set the leader's write cadence and disruptiveness.
+#[allow(clippy::too_many_arguments)]
+fn build_scenario(
+    n: usize,
+    grantors: &BTreeSet<usize>,
+    grantees: &BTreeSet<usize>,
+    guard_fail: FailRate,
+    renew_fail: FailRate,
+    write_every: WriteEvery,
+    write_disruptive: bool,
+    seed: u64,
+) -> Scenario {
     let mut s = Scenario::new(n)
-        .seed(1)
+        .seed(seed)
         .duration(MAX_TICKS)
-        .all_nodes(|nc| nc.initiate_chance = 0.5);
+        .all_nodes(|nc| nc.initiate_chance = 0.5)
+        .kind_drop(MsgKind::Guard, guard_fail.prob())
+        .kind_drop(MsgKind::Renew, renew_fail.prob())
+        .writes(write_every.interval(), write_disruptive);
     for &g in grantors {
         for &h in grantees {
             if g != h && g < n && h < n {
@@ -311,7 +416,8 @@ fn ledge_marker(status: LeaseStatus) -> &'static str {
     }
 }
 
-/// CSS class for a message glyph, grouped (colored) by protocol phase. Reply
+/// CSS class for a message glyph, grouped (colored) by protocol phase (guard
+/// blue, renew green, revoke orange, write purple, commit dark gray). Reply
 /// kinds add `is-reply`, which lightens the phase color a touch.
 fn msg_class(kind: MsgKind) -> &'static str {
     match kind {
@@ -320,13 +426,19 @@ fn msg_class(kind: MsgKind) -> &'static str {
         MsgKind::Renew => "pg-msg is-renew",
         MsgKind::RenewReply => "pg-msg is-renew is-reply",
         MsgKind::Revoke => "pg-msg is-revoke",
+        MsgKind::Write => "pg-msg is-write",
+        MsgKind::WriteReply => "pg-msg is-write is-reply",
+        MsgKind::Commit => "pg-msg is-commit",
     }
 }
 
-/// Whether a message is a grantee's acknowledgement reply — drawn with a small
+/// Whether a message is an acknowledgement reply — drawn with a small
 /// "thumbs-up" badge over its base glyph.
 fn msg_is_reply(kind: MsgKind) -> bool {
-    matches!(kind, MsgKind::GuardReply | MsgKind::RenewReply)
+    matches!(
+        kind,
+        MsgKind::GuardReply | MsgKind::RenewReply | MsgKind::WriteReply
+    )
 }
 
 /// Opacity of an in-flight message glyph at flight `progress` (`0.0..1.0` from
@@ -345,15 +457,52 @@ fn msg_opacity(progress: f64) -> f64 {
     }
 }
 
+/// Flight `progress` at which a *dropped* message dies mid-link: it travels this
+/// far from the sender, then vanishes in a red burst instead of reaching the
+/// destination. Kept short of the midpoint so the drop reads as happening in
+/// transit, not at the far node.
+const DROP_AT: f64 = 0.45;
+/// How much flight `progress` the red drop burst plays out over, starting at
+/// [`DROP_AT`]. The dropped message stays "in flight" (per the engine) until its
+/// would-be arrival, so there is always room for the burst after it.
+const BURST_DUR: f64 = 0.4;
+
+/// Opacity of a *dropped* message's glyph at flight `progress`: fades in on
+/// departure like a normal message, then fades out sharply as it reaches the
+/// drop point ([`DROP_AT`]), handing off to the burst. Zero once dropped.
+fn drop_glyph_opacity(progress: f64) -> f64 {
+    const FADE_IN: f64 = 0.15;
+    const FADE_OUT: f64 = 0.1; // last stretch before DROP_AT
+    if progress >= DROP_AT {
+        return 0.0;
+    }
+    if progress < FADE_IN {
+        (progress / FADE_IN).clamp(0.0, 1.0)
+    } else if progress > DROP_AT - FADE_OUT {
+        ((DROP_AT - progress) / FADE_OUT).clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// Burst animation parameter for a dropped message at flight `progress`, as
+/// `Some(bp)` with `bp` in `0.0..1.0` over the burst window, or `None` when the
+/// burst is not playing (before the drop or after it has faded).
+fn drop_burst(progress: f64) -> Option<f64> {
+    if progress < DROP_AT {
+        return None;
+    }
+    let bp = (progress - DROP_AT) / BURST_DUR;
+    (bp <= 1.0).then_some(bp.clamp(0.0, 1.0))
+}
+
 /// Symbol for an in-flight message, drawn inside its positioned `.pg-msg` chip:
 /// a shield for guard-phase messages, a circular "renew" arrow for renewals, a
-/// dot for revokes. Reply kinds (`*Reply`) overlay a small thumbs-up badge to
-/// mark them as acknowledgements. Colored by phase via `currentColor` (set on
-/// `.pg-msg` in CSS).
+/// dot for revokes, a pencil for writes, a checkmark for commits. Reply kinds
+/// (`*Reply`) overlay a small thumbs-up badge to mark them as acknowledgements.
+/// Colored by phase via `currentColor` (set on `.pg-msg` in CSS).
 #[component]
 fn MsgGlyph(kind: MsgKind) -> Element {
-    // Guard-phase → shield; renewals → circular refresh arrow (Material-style);
-    // revoke → a plain filled dot.
     let base = match kind {
         MsgKind::Guard | MsgKind::GuardReply => rsx! {
             svg { class: "pg-msg-icon", view_box: "0 0 24 24",
@@ -373,6 +522,18 @@ fn MsgGlyph(kind: MsgKind) -> Element {
         MsgKind::Revoke => rsx! {
             span { class: "pg-msg-dot" }
         },
+        // Write / WriteReply → a pencil (edit) glyph.
+        MsgKind::Write | MsgKind::WriteReply => rsx! {
+            svg { class: "pg-msg-icon", view_box: "0 0 24 24",
+                path { d: "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" }
+            }
+        },
+        // Commit → a bold checkmark.
+        MsgKind::Commit => rsx! {
+            svg { class: "pg-msg-icon", view_box: "0 0 24 24",
+                path { d: "M9 16.17 L4.83 12 l-1.42 1.41 L9 19 L21 7 l-1.41-1.41 z" }
+            }
+        },
     };
     rsx! {
         {base}
@@ -387,12 +548,33 @@ fn MsgGlyph(kind: MsgKind) -> Element {
     }
 }
 
+/// A small crown badge marking the "leader" node (the smallest-id grantee),
+/// tucked just above the node disk. Purely a topology annotation.
+#[component]
+fn Crown() -> Element {
+    rsx! {
+        svg { class: "pg-crown", view_box: "0 0 24 24",
+            // Five-point crown: base bar with three spikes and two dips.
+            path { d: "M3 8 L6.5 13 L12 6 L17.5 13 L21 8 L19 19 L5 19 Z" }
+        }
+    }
+}
+
 #[component]
 pub fn Playground() -> Element {
     let mut node_count = use_signal(|| 2usize);
     let mut grantors = use_signal(|| BTreeSet::from([0usize]));
     let mut grantees = use_signal(|| BTreeSet::from([1usize]));
     let mut preset = use_signal(|| Some(Preset::OneToOne));
+    // Per-kind message-failure switches; not part of the scenario *shape*, so
+    // they don't clear the chosen preset when changed. Applying a preset sets
+    // these too; the initial values match the default One-to-One preset.
+    let mut guard_fail = use_signal(|| FailRate::Tiny);
+    let mut renew_fail = use_signal(|| FailRate::Tiny);
+    // Write-load switches: how often the leader serves a write, and whether that
+    // write is disruptive. Like the failure switches, not part of the shape.
+    let mut write_every = use_signal(|| WriteEvery::Never);
+    let mut write_disruptive = use_signal(|| false);
 
     // Run state: lifecycle phase, the live engine (only during generation), the
     // recorded frames, per-run bookkeeping, and the scrub cursor.
@@ -401,6 +583,10 @@ pub fn Playground() -> Element {
     let mut frames = use_signal(Vec::<Frame>::new);
     let mut gen_state = use_signal(|| None::<GenState>);
     let mut cursor = use_signal(|| 0usize);
+    // Fast-forward toggle: when on, the generation loop advances `FF_MULT` frames
+    // per repaint instead of one, so a run plays out (and animates) that much
+    // faster. A playback preference, not part of the scenario shape.
+    let mut fast_forward = use_signal(|| false);
 
     // Discard any run, returning the canvas to static editing.
     let mut reset_sim = move || {
@@ -413,10 +599,11 @@ pub fn Playground() -> Element {
 
     // Generation loop: advance the engine live while a run is being generated,
     // a batch of `FRAMES_PER_STEP` fine-grained frames per repaint. Advancing
-    // live (rather than all at once) is what makes the settling visible; the
-    // batch keeps wall-clock pace reasonable at a fine time resolution. When the
-    // settle condition holds (or the cap is hit) it stops, leaving the recorded
-    // frames for scrubbing.
+    // live (rather than all at once) is what makes the run visible; the batch
+    // keeps wall-clock pace reasonable at a fine time resolution. The run plays
+    // on until the user pauses it (phase leaves `Generating`, keeping the engine
+    // for a later resume) or reaches the `MAX_TICKS` cap, which ends it as
+    // `Capped` and drops the engine, leaving the recorded frames for scrubbing.
     use_future(move || async move {
         loop {
             gloo_timers::future::sleep(Duration::from_millis(RENDER_MS as u64)).await;
@@ -424,8 +611,11 @@ pub fn Playground() -> Element {
                 continue;
             }
             let mut last_idx = None;
-            let mut done: Option<bool> = None;
-            for _ in 0..FRAMES_PER_STEP {
+            let mut capped = false;
+            // Fast-forward advances more frames per repaint (same frame
+            // resolution, faster wall-clock playback).
+            let batch = FRAMES_PER_STEP * if *fast_forward.peek() { FF_MULT } else { 1 };
+            for _ in 0..batch {
                 let t = match gen_state.peek().as_ref() {
                     Some(gs) => gs.t,
                     None => break,
@@ -441,45 +631,17 @@ pub fn Playground() -> Element {
                         None => break,
                     }
                 };
-                // Update majority-hold tracking and decide whether the run is done.
-                let (finished, settled_ok) = {
-                    let mut g = gen_state.write();
-                    let gs = g.as_mut().unwrap();
-                    for (node, since) in gs.major_since.iter_mut().enumerate() {
-                        let held = frame
-                            .leases
-                            .iter()
-                            .filter(|b| {
-                                b.grantee == node && b.grantee_status == LeaseStatus::Active
-                            })
-                            .count()
-                            + 1; // +1 for the node's implicit self-grant
-                        if held >= gs.maj {
-                            since.get_or_insert(t);
-                        } else {
-                            *since = None;
-                        }
-                    }
-                    let settled = !gs.grantees.is_empty()
-                        && gs
-                            .grantees
-                            .iter()
-                            .all(|&h| gs.major_since[h].is_some_and(|t0| t - t0 >= gs.settle));
-                    if settled {
-                        (true, true)
-                    } else if t >= MAX_TICKS {
-                        (true, false)
-                    } else {
-                        gs.t = t + FRAME_TICKS;
-                        (false, false)
-                    }
-                };
+                // Advance the frame clock, or flag the cap once reached.
+                if t >= MAX_TICKS {
+                    capped = true;
+                } else {
+                    gen_state.write().as_mut().unwrap().t = t + FRAME_TICKS;
+                }
                 // Append the frame; track the newest index for the live view.
                 let mut fr = frames.write();
                 fr.push(frame);
                 last_idx = Some(fr.len() - 1);
-                if finished {
-                    done = Some(settled_ok);
+                if capped {
                     break;
                 }
             }
@@ -487,23 +649,25 @@ pub fn Playground() -> Element {
             if let Some(idx) = last_idx {
                 cursor.set(idx);
             }
-            if let Some(settled_ok) = done {
-                phase.set(if settled_ok {
-                    Phase::Settled
-                } else {
-                    Phase::Capped
-                });
+            if capped {
+                phase.set(Phase::Capped);
                 engine.set(None); // recorded frames remain; free the engine
             }
         }
     });
 
-    // Apply a preset: set the count and both selection sets in one shot.
+    // Apply a preset: set the count, both selection sets, and the failure/write
+    // switches in one shot.
     let mut apply_preset = move |p: Preset| {
         let (n, gs, hs) = p.expand();
         node_count.set(n);
         grantors.set(gs.into_iter().collect());
         grantees.set(hs.into_iter().collect());
+        let (gf, rf, we, wd) = p.switches();
+        guard_fail.set(gf);
+        renew_fail.set(rf);
+        write_every.set(we);
+        write_disruptive.set(wd);
         preset.set(Some(p));
         reset_sim();
     };
@@ -521,6 +685,10 @@ pub fn Playground() -> Element {
     let maj = majority(n);
     let pts = ring_layout(n);
     let runnable = has_leases(n, &grantors.read(), &grantees.read());
+    // The "leader" is the smallest-id grantee (an all-to-one leader is the sole
+    // grantee; more generally we just crown the lowest-id one). Marked with a
+    // crown in the topology, in both the static and playback views.
+    let leader: Option<usize> = grantees.read().iter().copied().find(|&id| id < n);
 
     // Snapshot run state for this render.
     let ph = phase();
@@ -543,33 +711,51 @@ pub fn Playground() -> Element {
         let n = node_count();
         let gs = grantors.read().clone();
         let hs = grantees.read().clone();
-        let scenario = build_scenario(n, &gs, &hs);
-        let settle = SETTLE_MULT * scenario.params.t_lease;
+        let scenario = build_scenario(
+            n,
+            &gs,
+            &hs,
+            guard_fail(),
+            renew_fail(),
+            write_every(),
+            write_disruptive(),
+            fresh_seed(),
+        );
         engine.set(Some(Engine::new(scenario)));
         frames.write().clear();
         cursor.set(0);
-        gen_state.set(Some(GenState {
-            t: 0,
-            major_since: vec![None; n],
-            maj: majority(n),
-            settle,
-            grantees: hs,
-        }));
+        gen_state.set(Some(GenState { t: 0 }));
         phase.set(Phase::Generating);
     };
 
-    // Stop: manually end an in-progress generation at the current frame, keeping
-    // the recorded run for scrubbing (a user-declared settle).
-    let on_stop = move |_| {
+    // Pause: halt an in-progress generation at the current frame, keeping the
+    // engine and bookkeeping so Resume can pick the run back up. The recorded
+    // frames stay scrubbable while paused.
+    let on_pause = move |_| {
         if *phase.peek() == Phase::Generating {
-            phase.set(Phase::Stopped);
-            engine.set(None); // recorded frames remain; free the engine
+            phase.set(Phase::Paused);
         }
     };
 
-    // The run button toggles Play/Stop depending on whether a run is generating.
+    // Resume: continue generating a paused run from where it left off. The engine
+    // and `gen_state` were kept on pause, so the loop resumes at the next frame.
+    let on_resume = move |_| {
+        if *phase.peek() == Phase::Paused {
+            phase.set(Phase::Generating);
+        }
+    };
+
+    // Restart: discard the current run entirely and return to static editing, so
+    // the next Play starts fresh. Enabled whenever a run exists (any non-idle
+    // phase), whether it is playing, paused, or capped.
+    let on_restart = move |_| reset_sim();
+
+    // The primary run button toggles Play / Pause / Resume by phase.
     let generating = ph == Phase::Generating;
-    let scrubbable = matches!(ph, Phase::Settled | Phase::Stopped | Phase::Capped);
+    let paused = ph == Phase::Paused;
+    // A run exists (playing, paused, or capped) — Restart is live, timeline scrubs.
+    let has_run = ph != Phase::Idle;
+    let scrubbable = matches!(ph, Phase::Paused | Phase::Capped);
 
     // Timeline extents and readouts, in global ticks.
     let end_ticks = (rec_len.saturating_sub(1)) as Time * FRAME_TICKS;
@@ -620,7 +806,7 @@ pub fn Playground() -> Element {
         .collect();
 
     // Grant-status bars derive from the recorded frames (the single source of
-    // truth, which persists after a run settles). A node that is both a grantor
+    // truth, which persists once a run stops). A node that is both a grantor
     // and a grantee grants to itself, so it always holds that 1 implicit grant
     // (`self_grant`). The max a node can hold as a grantee is the grantors that
     // grant to it, plus its own self-grant; a non-grantee has max 0 and renders
@@ -666,7 +852,13 @@ pub fn Playground() -> Element {
             div { class: "pg-row",
                 span { class: "pg-label", "Preset" }
                 div { class: "pg-pills",
-                    for p in [Preset::OneToOne, Preset::Leader, Preset::Quorum, Preset::Roster] {
+                    for p in [
+                        Preset::OneToOne,
+                        Preset::LeaseManager,
+                        Preset::Leader,
+                        Preset::Quorum,
+                        Preset::Roster,
+                    ] {
                         button {
                             key: "{p.label()}",
                             class: if preset() == Some(p) { "pg-pill is-on" } else { "pg-pill" },
@@ -733,6 +925,54 @@ pub fn Playground() -> Element {
                     preset.set(None);
                     reset_sim();
                 },
+            }
+
+            // Row 5: per-kind message-failure switches. These drop a fraction of
+            // Guard / Renew messages; changing one discards any run but leaves
+            // the scenario shape (and its preset) intact.
+            div { class: "pg-row",
+                span { class: "pg-label", "Msg drop" }
+                div { class: "pg-fails",
+                    FailSwitch {
+                        label: "Guard",
+                        selected: guard_fail(),
+                        on_select: move |r| {
+                            guard_fail.set(r);
+                            reset_sim();
+                        },
+                    }
+                    FailSwitch {
+                        label: "Renew",
+                        selected: renew_fail(),
+                        on_select: move |r| {
+                            renew_fail.set(r);
+                            reset_sim();
+                        },
+                    }
+                }
+            }
+
+            // Row 6: write-load switches — how often the leader serves a write,
+            // and whether that write is disruptive. Like the failure switches,
+            // changing one discards the run but keeps the scenario shape.
+            div { class: "pg-row",
+                span { class: "pg-label", "Writes" }
+                div { class: "pg-fails",
+                    WriteEverySwitch {
+                        selected: write_every(),
+                        on_select: move |w| {
+                            write_every.set(w);
+                            reset_sim();
+                        },
+                    }
+                    DisruptiveSwitch {
+                        selected: write_disruptive(),
+                        on_select: move |d| {
+                            write_disruptive.set(d);
+                            reset_sim();
+                        },
+                    }
+                }
             }
 
             // The canvas: static scenario while editing, animated frame otherwise.
@@ -879,16 +1119,53 @@ pub fn Playground() -> Element {
                     }
                     if let Some(f) = current_frame.as_ref() {
                         for (i , m) in f.messages.iter().enumerate() {
-                            div {
-                                key: "m{i}",
-                                class: msg_class(m.kind),
-                                style: format!(
-                                    "left: {:.3}%; top: {:.3}%; opacity: {:.3};",
-                                    m.pos.x * 100.0,
-                                    m.pos.y * 100.0,
-                                    msg_opacity(m.progress),
-                                ),
-                                MsgGlyph { kind: m.kind }
+                            // The glyph: a delivered message fades out at the
+                            // destination; a dropped one fades out early at the
+                            // mid-link drop point, handing off to the red burst.
+                            {
+                                let opacity = match m.fate {
+                                    MsgFate::Dropped => drop_glyph_opacity(m.progress),
+                                    MsgFate::Delivered => msg_opacity(m.progress),
+                                };
+                                rsx! {
+                                    div {
+                                        key: "m{i}",
+                                        class: msg_class(m.kind),
+                                        style: format!(
+                                            "left: {:.3}%; top: {:.3}%; opacity: {:.3};",
+                                            m.pos.x * 100.0,
+                                            m.pos.y * 100.0,
+                                            opacity,
+                                        ),
+                                        MsgGlyph { kind: m.kind }
+                                    }
+                                }
+                            }
+                            // Drop burst: a red shockwave + ✕ at the drop point,
+                            // driven by flight `progress` so it stays in sync
+                            // while scrubbing the timeline.
+                            if m.fate == MsgFate::Dropped {
+                                if let Some(bp) = drop_burst(m.progress) {
+                                    {
+                                        let p = lerp(pts[m.from], pts[m.to], DROP_AT);
+                                        rsx! {
+                                            div {
+                                                key: "d{i}",
+                                                class: "pg-drop",
+                                                style: format!(
+                                                    "left: {:.3}%; top: {:.3}%; --bp: {:.3};",
+                                                    p.x * 100.0,
+                                                    p.y * 100.0,
+                                                    bp,
+                                                ),
+                                                span { class: "pg-drop-ring" }
+                                                svg { class: "pg-drop-x", view_box: "0 0 24 24",
+                                                    path { d: "M6 6 L18 18 M18 6 L6 18" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -914,6 +1191,9 @@ pub fn Playground() -> Element {
                                 pts[id].y * 100.0,
                                 aura_style(aura[id]),
                             ),
+                            if leader == Some(id) {
+                                Crown {}
+                            }
                             span { class: "pg-node-id", "{id}" }
                         }
                     }
@@ -972,6 +1252,9 @@ pub fn Playground() -> Element {
                             key: "{id}",
                             class: if grantors.read().contains(&id) && grantees.read().contains(&id) { "pg-node is-grantor is-grantee" } else if grantors.read().contains(&id) { "pg-node is-grantor" } else if grantees.read().contains(&id) { "pg-node is-grantee" } else { "pg-node" },
                             style: format!("left: {:.3}%; top: {:.3}%;", pts[id].x * 100.0, pts[id].y * 100.0),
+                            if leader == Some(id) {
+                                Crown {}
+                            }
                             span { class: "pg-node-id", "{id}" }
                         }
                     }
@@ -980,16 +1263,22 @@ pub fn Playground() -> Element {
 
             // Run bar: a 3-column grid — [control | track | status] — shared by
             // the axis and grant-bar rows below so slider, axis, and every bar
-            // line up on the same track. Control cell = Play button + clock glyph.
+            // line up on the same track. Control cell = run button + clock glyph.
             div { class: "pg-runbar",
                 div { class: "pg-runctrl",
-                    // Toggles Play → Stop while a run generates; Stop manually
-                    // ends it as a user-declared settle.
+                    // Primary button cycles Play (idle/capped) → Pause (while
+                    // running) → Resume (while paused).
                     if generating {
                         button {
                             class: "pg-btn is-stop",
-                            onclick: on_stop,
-                            "Stop"
+                            onclick: on_pause,
+                            "Pause"
+                        }
+                    } else if paused {
+                        button {
+                            class: "pg-btn",
+                            onclick: on_resume,
+                            "Resume"
                         }
                     } else {
                         button {
@@ -1027,13 +1316,10 @@ pub fn Playground() -> Element {
                         match ph {
                             Phase::Generating => rsx! {
                                 span { class: "pg-spinner" }
-                                span { class: "pg-status", "settling…" }
+                                span { class: "pg-status", "sim running" }
                             },
-                            Phase::Settled => rsx! {
-                                span { class: "pg-status", "✓ run settled" }
-                            },
-                            Phase::Stopped => rsx! {
-                                span { class: "pg-status", "✓ run stopped" }
+                            Phase::Paused => rsx! {
+                                span { class: "pg-status", "run stopped" }
                             },
                             Phase::Capped => rsx! {
                                 span { class: "pg-status is-error", "✗ ticks limit" }
@@ -1052,11 +1338,17 @@ pub fn Playground() -> Element {
                 }
             }
 
-            // Timing axis on the shared grid: an empty control cell, then the
-            // track (scrub time centered, run end at the right), then an empty
-            // status cell — so it lines up exactly under the slider.
+            // Timing axis on the shared grid: the Restart button sits in the
+            // control cell (directly under the run button, no wasted row), then
+            // the track (scrub time centered, run end at the right), then an
+            // empty status cell — all lined up under the slider.
             div { class: "pg-timeaxis",
-                span {}
+                button {
+                    class: "pg-btn is-ghost",
+                    disabled: !has_run,
+                    onclick: on_restart,
+                    "Restart"
+                }
                 span { class: "pg-axis-track",
                     span { class: "pg-axis-spacer" }
                     span { class: "pg-time-readout",
@@ -1065,7 +1357,12 @@ pub fn Playground() -> Element {
                     }
                     span { class: "pg-axis-end", "max {end_ticks} ticks" }
                 }
-                span {}
+                // Fast-forward toggle in the status cell, under the run status.
+                button {
+                    class: if fast_forward() { "pg-ff is-on" } else { "pg-ff" },
+                    onclick: move |_| fast_forward.toggle(),
+                    "3x ⏩\u{fe0e}"
+                }
             }
 
             // Grant-status bars: one per node, on the same shared grid so every
@@ -1087,7 +1384,12 @@ pub fn Playground() -> Element {
                                         key: "{i}",
                                         class: "pg-grantbar-seg",
                                         style: "flex-grow: {run.frames}; background-color: {grant_color(run.grants, max_grants[id])};",
-                                        "data-hint": "{run.grants} grant{plural(run.grants)} held · {run.frames as i64 * FRAME_TICKS} ticks",
+                                        "data-hint": format!(
+                                            "{} grant{} held · {} ticks",
+                                            run.grants,
+                                            plural(run.grants),
+                                            run.frames as i64 * FRAME_TICKS,
+                                        ),
                                     }
                                 }
                                 // Playhead marker, kept in sync with the timeline slider handle.
@@ -1106,22 +1408,22 @@ pub fn Playground() -> Element {
 
             p { class: "pg-caption",
                 "Hardcoded: "
-                TConst { name: "expire", hint: "Lease expiration timeout" }
+                TConst { name: "expire", hint: "Lease expiration timeout", ticks: "1500 ticks" }
                 " ≈ "
-                TConst { name: "guard", hint: "Guard phase timeout" }
+                TConst { name: "guard", hint: "Guard phase timeout", ticks: "1500 ticks" }
                 " ≈ 2.5 x "
-                TConst { name: "renew", hint: "Lease renewal interval" }
+                TConst { name: "renew", hint: "Lease renewal interval", ticks: "600 ticks" }
                 span { class: "pg-sep", ";" }
-                TConst { name: "renew", hint: "Lease renewal interval" }
+                TConst { name: "renew", hint: "Lease renewal interval", ticks: "600 ticks" }
                 " ≈ 3 x "
-                TConst { name: "msg", hint: "Average message delivery delay" }
+                TConst { name: "msg", hint: "Average message delivery delay", ticks: "~200 ticks avg" }
                 span { class: "pg-sep", ";" }
-                TConst { name: "msg", hint: "Average message delivery delay" }
+                TConst { name: "msg", hint: "Average message delivery delay", ticks: "~200 ticks avg" }
                 " ≈ 2 x "
-                TConst { name: "Δ", hint: "Bounded clock drift" }
+                TConst { name: "Δ", hint: "Bounded clock drift", ticks: "100 ticks" }
                 " with ±40% jitter"
                 span { class: "pg-sep", ";" }
-                TConst { name: "Δ", hint: "Bounded clock drift" }
+                TConst { name: "Δ", hint: "Bounded clock drift", ticks: "100 ticks" }
                 " is 100 ticks."
             }
         }
@@ -1129,13 +1431,91 @@ pub fn Playground() -> Element {
 }
 
 /// A boxed timing constant `T_name`, math-styled with a subscript and a hover
-/// tooltip explaining what it is. `name` is the subscript text (e.g. "expire").
+/// tooltip explaining what it is. `name` is the subscript text (e.g. "expire");
+/// `ticks` is the constant's length (e.g. "1500 ticks"), appended to the hint.
 #[component]
-fn TConst(name: &'static str, hint: &'static str) -> Element {
+fn TConst(name: &'static str, hint: &'static str, ticks: &'static str) -> Element {
     rsx! {
-        span { class: "pg-tconst", "data-hint": "{hint}",
+        span { class: "pg-tconst", "data-hint": "{hint} ({ticks})",
             "T"
             sub { "{name}" }
+        }
+    }
+}
+
+/// One failure switch: a small label (the message kind) followed by the five
+/// mutually-exclusive rate pills (Off / 1% / 10% / 30% / 100%).
+#[component]
+fn FailSwitch(
+    label: &'static str,
+    selected: FailRate,
+    on_select: EventHandler<FailRate>,
+) -> Element {
+    rsx! {
+        div { class: "pg-fail",
+            span { class: "pg-fail-label", "{label}" }
+            div { class: "pg-fail-pills",
+                for r in [
+                    FailRate::Off,
+                    FailRate::Tiny,
+                    FailRate::Low,
+                    FailRate::Some,
+                    FailRate::All,
+                ] {
+                    button {
+                        key: "{r.label()}",
+                        class: if selected == r { "pg-fail-pill is-on" } else { "pg-fail-pill" },
+                        onclick: move |_| on_select.call(r),
+                        "{r.label()}"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The "Every" write switch: how often the leader serves a write
+/// (Never / 3000 ticks / 1000 ticks / 300 ticks). Reuses the failure-switch pill styling.
+#[component]
+fn WriteEverySwitch(selected: WriteEvery, on_select: EventHandler<WriteEvery>) -> Element {
+    rsx! {
+        div { class: "pg-fail",
+            span { class: "pg-fail-label", "Every" }
+            div { class: "pg-fail-pills",
+                for w in [
+                    WriteEvery::Never,
+                    WriteEvery::Slow,
+                    WriteEvery::Mid,
+                    WriteEvery::Fast,
+                ] {
+                    button {
+                        key: "{w.label()}",
+                        class: if selected == w { "pg-fail-pill is-on" } else { "pg-fail-pill" },
+                        onclick: move |_| on_select.call(w),
+                        "{w.label()}"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The "Disruptive" write switch: Yes / No. Reuses the failure-switch styling.
+#[component]
+fn DisruptiveSwitch(selected: bool, on_select: EventHandler<bool>) -> Element {
+    rsx! {
+        div { class: "pg-fail",
+            span { class: "pg-fail-label", "Disruptive" }
+            div { class: "pg-fail-pills",
+                for (val , text) in [(true, "Yes"), (false, "No")] {
+                    button {
+                        key: "{text}",
+                        class: if selected == val { "pg-fail-pill is-on" } else { "pg-fail-pill" },
+                        onclick: move |_| on_select.call(val),
+                        "{text}"
+                    }
+                }
+            }
         }
     }
 }

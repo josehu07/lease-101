@@ -10,3 +10,12 @@ dioxus = { version = "=0.7.9", features = ["web", "router"] }
 lease_sim = { path = ".." }
 # Wall-clock timer for the playground's animation playback loop (WASM).
 gloo-timers = { version = "0.3", features = ["futures"] }
+# `Math.random()` seed source, so each Play generates a fresh random run.
+js-sys = "0.3"
+
+# Build-time only: the walkthrough prose lives in `content/*.md` and is rendered
+# to HTML by `build.rs`, so no markdown parser ships in the WASM bundle.
+[build-dependencies]
+pulldown-cmark = "0.12"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }

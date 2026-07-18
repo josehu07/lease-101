@@ -12,7 +12,8 @@ pub struct LeaseId {
     pub grantee: NodeId,
 }
 
-/// Wire message kinds, mirroring the one-to-one leasing algorithm.
+/// Wire message kinds, mirroring the one-to-one leasing algorithm, plus the
+/// write-path messages layered on top (leader write broadcast / reply / commit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsgKind {
     /// Grantor -> grantee: open the guard phase.
@@ -25,6 +26,24 @@ pub enum MsgKind {
     RenewReply,
     /// Grantor -> grantee: proactively deactivate the lease.
     Revoke,
+    /// Leader -> every other node: a write request to be served (disruptive
+    /// path: recipients suspend the read leases they hold before replying).
+    Write,
+    /// Node -> leader: acknowledge a `Write` (its held reads are now suspended).
+    WriteReply,
+    /// Leader -> every other node: the write committed; suspended read leases
+    /// may resume (re-activate on the next renew).
+    Commit,
+}
+
+impl MsgKind {
+    /// Number of distinct message kinds — the length of a per-kind array.
+    pub const COUNT: usize = 8;
+
+    /// Stable array index for this kind (`0..COUNT`), matching declaration order.
+    pub fn index(self) -> usize {
+        self as usize
+    }
 }
 
 /// What ultimately happens to a message once it is sent.
@@ -105,4 +124,8 @@ pub enum EventKind {
     NodeFailed { node: NodeId },
     /// A node recovered from a crash.
     NodeRecovered { node: NodeId },
+    /// The leader began serving a write (broadcast just went out).
+    WriteStarted { leader: NodeId },
+    /// The leader's write committed (enough replies gathered).
+    WriteCommitted { leader: NodeId },
 }

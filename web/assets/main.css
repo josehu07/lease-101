@@ -13,6 +13,12 @@
     --max-width: 820px;
     --radius: 12px;
 
+    /* Body font: Source Sans 3 (loaded in the HTML shell head), with a system
+       sans-serif fallback stack while the web font loads or if it fails. */
+    --font-sans:
+        "Source Sans 3", system-ui, -apple-system, "Segoe UI", Roboto,
+        sans-serif;
+
     /* Dark-blue banner, independent of the light page theme. */
     --nav-bg: #10233f;
     --nav-bg-accent: #1b3a63;
@@ -27,6 +33,9 @@
 }
 
 html {
+    /* Bump the root size 1px above the 16px default; every rem-based size on
+       the page scales up with it. */
+    font-size: 17px;
     scroll-behavior: smooth;
     /* Keep anchored sections clear of the sticky nav. */
     scroll-padding-top: 4rem;
@@ -41,7 +50,7 @@ body {
 body {
     background: var(--bg);
     color: var(--text);
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-family: var(--font-sans);
     line-height: 1.65;
 }
 
@@ -119,10 +128,59 @@ body {
     margin: 0 0 1rem;
 }
 
-/* Intro lead paragraph: a touch larger, to open the page. */
-.lead {
+/* Prose rendered from markdown (content/*.md) into a `.prose` wrapper. The
+   markdown emits plain <p>/<ol>/<blockquote>, so these element-scoped rules
+   replace the old per-block classes. */
+
+/* Bump the main reading text a touch above the 1rem body default; child prose
+   elements (paragraphs, list items, blockquote) inherit or scale off this. */
+.prose {
     font-size: 1.08rem;
+}
+
+.prose p {
+    margin: 0 0 1rem;
+}
+
+/* Drop the top margin on each section's opening paragraph. */
+.prose > p:first-child {
     margin-top: 0;
+}
+
+/* Ordered lists in prose: the intro ladder and the guard/renew steps. */
+.prose ol {
+    margin: 1rem 0;
+    padding-left: 1.4rem;
+}
+
+.prose ol li {
+    margin: 0.5rem 0;
+    padding-left: 0.25rem;
+}
+
+/* Links in prose (the ladder rungs) read in the accent blue. */
+.prose a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.prose a:hover {
+    text-decoration: underline;
+}
+
+/* Safety-invariant blockquote (markdown `>` in the one-to-one section). */
+.prose blockquote {
+    margin: 1.2rem 0;
+    padding: 0.6rem 1.1rem;
+    border-left: 3px solid var(--grantee);
+    background: color-mix(in srgb, var(--grantee) 7%, var(--surface));
+    border-radius: 0 var(--radius) var(--radius) 0;
+    font-style: italic;
+    color: var(--text);
+}
+
+.prose blockquote p {
+    margin: 0;
 }
 
 /* Inline math-styled variable (t_Δ, ⌈n/2⌉, (Q, O), …). */
@@ -137,31 +195,6 @@ body {
     font-style: normal;
 }
 
-/* The progression ladder in the intro: the four rungs, tightly spaced. */
-.ladder {
-    margin: 0.5rem 0 0;
-    padding-left: 1.4rem;
-}
-
-.ladder li {
-    margin: 0.35rem 0;
-}
-
-.ladder a {
-    color: var(--accent);
-    text-decoration: none;
-}
-
-.ladder a:hover {
-    text-decoration: underline;
-}
-
-.blurb {
-    color: var(--text);
-    margin: 0 0 1rem;
-    font-size: 1.05rem;
-}
-
 /* ---- Algorithm sections: numbered step + pattern tag ------------------ */
 
 .algo-head {
@@ -172,7 +205,7 @@ body {
     margin-bottom: 1.1rem;
 }
 
-/* Small ordinal (01…04) marking the rung of the ladder — muted but legible. */
+/* Small ordinal (01…05) marking the rung of the ladder — muted but legible. */
 .algo-step {
     flex: 0 0 auto;
     font-size: 1.1rem;
@@ -197,35 +230,6 @@ body {
 /* The algo heading sits inside the head row, so drop the Section h2 margin. */
 .algo-head h2 {
     margin: 0;
-}
-
-.algo p {
-    margin: 0 0 1rem;
-}
-
-/* ---- Safety invariant blockquote -------------------------------------- */
-
-.invariant {
-    margin: 1.2rem 0;
-    padding: 0.6rem 1.1rem;
-    border-left: 3px solid var(--grantee);
-    background: color-mix(in srgb, var(--grantee) 7%, var(--surface));
-    border-radius: 0 var(--radius) var(--radius) 0;
-    font-size: 1.05rem;
-    font-style: italic;
-    color: var(--text);
-}
-
-/* ---- Numbered phase/step list ----------------------------------------- */
-
-.steps {
-    margin: 1rem 0;
-    padding-left: 1.4rem;
-}
-
-.steps li {
-    margin: 0.55rem 0;
-    padding-left: 0.25rem;
 }
 
 /* ---- Pro / Con tradeoff pair ------------------------------------------ */
@@ -373,7 +377,7 @@ body {
 
     /* Shared side-column widths for the run bar / time axis / grant-bar rows,
        so the slider, axis, and every bar line up on the same middle track.
-       Control = Play button + clock; status = the longest settle text. */
+       Control = run button + clock; status = the longest status text. */
     --pg-ctrl: 6.5rem;
     --pg-status: 6.75rem;
 }
@@ -459,9 +463,70 @@ body {
     font-size: 0.8rem;
 }
 
+/* ---- Per-kind message-failure switches ------------------------------- */
+
+/* The two switches (Guard / Renew) sit in one row, spaced apart. */
+.pg-fails {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1.1rem;
+}
+
+/* One switch: its kind label, then a segmented group of rate pills. */
+.pg-fail {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.pg-fail-label {
+    font-size: 0.85rem;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+/* Segmented control: the three rate pills butt together into one bar. */
+.pg-fail-pills {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+}
+
+.pg-fail-pill {
+    border: none;
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    padding: 0.3rem 0.7rem;
+    font: inherit;
+    font-size: 0.82rem;
+    line-height: 1;
+    cursor: pointer;
+    transition:
+        background 0.15s ease,
+        color 0.15s ease;
+}
+
+/* No divider before the first pill in the group. */
+.pg-fail-pill:first-child {
+    border-left: none;
+}
+
+.pg-fail-pill:hover:not(.is-on) {
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+
+/* Selected rate: the same accent blue as the other control pills. */
+.pg-fail-pill.is-on {
+    background: var(--accent);
+    color: #fff;
+}
+
 .pg-slider {
     flex: 1 1 auto;
-    max-width: 16rem;
+    max-width: 22rem;
     accent-color: var(--accent);
     cursor: pointer;
 }
@@ -540,7 +605,7 @@ body {
     background: var(--nav-bg);
     color: var(--nav-text);
     border-radius: 6px;
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-family: var(--font-sans);
     font-style: normal;
     font-size: 0.78rem;
     line-height: 1.3;
@@ -679,6 +744,26 @@ body {
     pointer-events: none;
 }
 
+/* Crown badge on the leader node (smallest-id grantee): a small gold crown
+   perched just above the disk, centered on it. Absolutely placed relative to
+   the node (which is itself translated by -50%,-50%), so it rides along as the
+   ring re-lays-out. */
+.pg-crown {
+    position: absolute;
+    top: -0.95rem;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 1.15rem;
+    height: 1.15rem;
+    fill: #f2b807;
+    stroke: #a9790a;
+    stroke-width: 1;
+    stroke-linejoin: round;
+    pointer-events: none;
+    filter: drop-shadow(0 1px 1px rgba(16, 35, 63, 0.3));
+    z-index: 2;
+}
+
 @keyframes pg-node-in {
     from {
         transform: translate(-50%, -50%) scale(0.2);
@@ -697,7 +782,7 @@ body {
    side columns are FIXED widths (shared via --pg-ctrl / --pg-status) — an `auto`
    first column would size to each row's own content, so the track would start
    at a different x on every row. The track (1fr) then takes all remaining width;
-   the status column is anchored to the longest settle text, not the current
+   the status column is anchored to the longest status text, not the current
    message, so the slider width never shifts across phases. */
 .pg-runbar,
 .pg-timeaxis,
@@ -712,8 +797,8 @@ body {
     margin-top: 0.45rem;
 }
 
-/* Control cell: the Play button on the left, the clock glyph pushed to the
-   right so it hugs the slider's left edge. */
+/* Control cell: the run button on the left, the clock glyph pushed to the right
+   so it hugs the slider's left edge. */
 .pg-runctrl {
     display: flex;
     align-items: center;
@@ -721,10 +806,13 @@ body {
     gap: 0.5rem;
 }
 
-/* The Play button: a solid accent action button, left-aligned in the run bar. */
+/* The run buttons: solid accent action buttons. A FIXED width keeps the primary
+   button from resizing as its label changes (Play / Pause / Resume) — which also
+   keeps the clock glyph beside it from shifting — and makes Restart match it. */
 .pg-btn {
     flex: 0 0 auto;
-    padding: 0.4rem 1.1rem;
+    width: 5rem;
+    padding: 0.4rem 0.5rem;
     border: 1px solid var(--accent);
     background: var(--accent);
     color: #fff;
@@ -733,6 +821,7 @@ body {
     font: inherit;
     font-weight: 600;
     line-height: 1;
+    text-align: center;
     transition:
         background 0.15s ease,
         transform 0.08s ease;
@@ -753,7 +842,7 @@ body {
     cursor: not-allowed;
 }
 
-/* Stop variant, shown while a run is generating: a red action button. */
+/* Pause variant, shown while a run is generating: a red action button. */
 .pg-btn.is-stop {
     background: var(--danger);
     border-color: var(--danger);
@@ -763,12 +852,63 @@ body {
     background: #b32a30;
 }
 
-/* Status cell (fixed width): its text sits at the left of the cell, just past
-   the slider's right edge. */
+/* Restart (ghost) variant: a quiet outlined button, gray/disabled until a run
+   exists. Left-aligned in its grid cell so it sits under the run button. */
+.pg-btn.is-ghost {
+    justify-self: start;
+    background: transparent;
+    border-color: var(--border);
+    color: var(--muted);
+    font-weight: 600;
+}
+
+.pg-btn.is-ghost:hover:not(:disabled) {
+    background: var(--surface);
+    border-color: var(--muted);
+    color: var(--text);
+}
+
+/* Fast-forward toggle in the time-axis status cell (under the run status): a
+   small pill, quiet when off, accent-filled when on. */
+.pg-ff {
+    justify-self: end;
+    /* Nudged left off the cell's right edge. */
+    margin-right: 2.5rem;
+    padding: 0.32rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.9rem;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    transition:
+        background 0.15s ease,
+        border-color 0.15s ease,
+        color 0.15s ease;
+}
+
+.pg-ff:hover:not(.is-on) {
+    border-color: var(--accent);
+    color: var(--text);
+}
+
+.pg-ff.is-on {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+/* Status cell (fixed width): its text sits at the left of the cell, a little
+   past the slider's right edge. */
 .pg-runstatus {
     display: flex;
     align-items: center;
     gap: 0.4rem;
+    padding-left: 0.5rem;
 }
 
 .pg-status {
@@ -783,14 +923,14 @@ body {
     font-style: italic;
 }
 
-/* Error status ("✗ ticks limit"): the run never settled within the tick cap. */
+/* Error status ("✗ ticks limit"): the run hit the tick cap. */
 .pg-status.is-error {
     color: var(--danger);
     font-weight: 600;
 }
 
 
-/* A small spinning ring shown while a run is settling. */
+/* A small spinning ring shown while a run is generating. */
 .pg-spinner {
     width: 0.9rem;
     height: 0.9rem;
@@ -868,15 +1008,29 @@ body {
     color: color-mix(in srgb, var(--grantor) 72%, #000);
 }
 
-/* Reply messages (guard/renew acknowledgements) are a touch lighter than their
-   request counterparts — the color drives both the symbol and the thumbs-up
-   badge via `currentColor`. */
+/* Write messages: a distinct purple so they read as the write path, apart from
+   the guard/renew/revoke lease traffic. Commits are a neutral dark gray. */
+.pg-msg.is-write {
+    color: #6d3bd4;
+}
+
+.pg-msg.is-commit {
+    color: #3d434f;
+}
+
+/* Reply messages (guard/renew/write acknowledgements) are a touch lighter than
+   their request counterparts — the color drives both the symbol and the
+   thumbs-up badge via `currentColor`. */
 .pg-msg.is-guard.is-reply {
     color: color-mix(in srgb, var(--accent) 92%, #fff);
 }
 
 .pg-msg.is-renew.is-reply {
     color: color-mix(in srgb, var(--grantee) 90%, #fff);
+}
+
+.pg-msg.is-write.is-reply {
+    color: #8a5fe0;
 }
 
 /* The base message symbol fills the chip, filled in the phase color and lifted
@@ -904,10 +1058,10 @@ body {
    glyph; the thumb itself is the phase color. */
 .pg-msg-badge {
     position: absolute;
-    top: -0.28rem;
-    right: -0.36rem;
-    width: 1.05rem;
-    height: 1.05rem;
+    top: -0.32rem;
+    right: -0.42rem;
+    width: 1.3rem;
+    height: 1.3rem;
     display: grid;
     place-items: center;
     border-radius: 50%;
@@ -916,9 +1070,54 @@ body {
 }
 
 .pg-msg-badge-icon {
-    width: 0.78rem;
-    height: 0.78rem;
+    width: 0.98rem;
+    height: 0.98rem;
     fill: currentColor;
+}
+
+/* ---- Dropped-message burst ------------------------------------------- */
+
+/* A dropped message vanishes mid-link and plays this red burst there. The
+   burst progress `--bp` (0..1) is set inline from flight progress — NOT a CSS
+   keyframe — so it stays in exact sync while the timeline is scrubbed back and
+   forth. Anchored at the drop point (its own center). */
+.pg-drop {
+    position: absolute;
+    width: 1.8rem;
+    height: 1.8rem;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 4;
+    color: var(--danger);
+}
+
+/* Expanding shockwave ring: grows from small to ~2.4x and fades as --bp → 1. */
+.pg-drop-ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 2px solid var(--danger);
+    /* scale 0.3 → 2.4 over the burst; opacity 0.9 → 0. */
+    transform: scale(calc(0.3 + 2.1 * var(--bp)));
+    opacity: calc(0.9 * (1 - var(--bp)));
+}
+
+/* The red ✕ marking the drop: pops in quickly, holds, then fades with the ring.
+   A soft white halo keeps it legible over edges and nodes. */
+.pg-drop-x {
+    position: absolute;
+    inset: 15%;
+    width: 70%;
+    height: 70%;
+    fill: none;
+    stroke: var(--danger);
+    stroke-width: 3.2;
+    stroke-linecap: round;
+    /* Overshoot then settle: scale 0.4 → 1.15 by mid-burst, easing the eye to
+       the drop; opacity fades over the final third. */
+    transform: scale(calc(0.4 + 0.9 * var(--bp)));
+    opacity: calc(1 - max(0, (var(--bp) - 0.6)) / 0.4);
+    filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.9));
 }
 
 /* A node currently holding a majority of leases gets a green border. The green
@@ -1010,9 +1209,12 @@ body {
 }
 
 /* Time axis: on the shared grid, so its track cell lines up under the slider.
-   Sits tight under the slider row. */
+   Also holds the Restart button in its control cell. A small gap above keeps the
+   two button rows from butting together; a negative gap below trims the wider
+   `.pg-root` flex gap so the row sits snug against the grant bars. */
 .pg-timeaxis {
-    margin-top: -0.05rem;
+    margin-top: 0.15rem;
+    margin-bottom: -0.4rem;
     color: var(--muted);
     font-variant-numeric: tabular-nums;
 }

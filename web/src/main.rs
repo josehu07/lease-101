@@ -7,6 +7,7 @@
 use dioxus::prelude::*;
 
 mod components;
+mod content;
 mod playground;
 
 use components::Route;
