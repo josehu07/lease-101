@@ -108,8 +108,17 @@ impl PartialOrd for Timed {
 #[derive(Debug, Clone, Copy)]
 struct GrantorState {
     status: LeaseStatus,
-    /// Grantor-local time until which the promise is held (`D'`).
+    /// Grantor-local time until which the promise is held (`D'`). Safety-padded
+    /// well past one lease span (see [`Engine::send_renew`]), so it is *not*
+    /// suitable for the countdown bar — [`display_expiry`](Self::display_expiry)
+    /// is.
     grant_expiry: Time,
+    /// Grantor-local expiry used only to render the countdown bar: the last
+    /// reachability proof (activating `GuardReply`, then each `RenewReply`) plus
+    /// one `t_lease`, mirroring the grantee's `hold_expiry`. Unlike the padded
+    /// safety bound `grant_expiry`, this starts a fresh promise at a full bar and
+    /// drains cleanly, refilling on each reply.
+    display_expiry: Time,
     /// Grantor-local time the next renew is due to be sent.
     next_renew_due: Time,
     /// Whether the grantor currently intends this lease to be active.
@@ -225,6 +234,7 @@ impl Engine {
                 grantor: GrantorState {
                     status: LeaseStatus::Inactive,
                     grant_expiry: 0,
+                    display_expiry: 0,
                     next_renew_due: 0,
                     intended: false,
                     guard_since: 0,
@@ -355,7 +365,12 @@ impl Engine {
                 grantee: l.id.grantee,
                 grantor_status: l.grantor.status,
                 grantee_status: l.grantee.status,
-                grantor_fill: self.fill(l.id.grantor, l.grantor.status, l.grantor.grant_expiry, t),
+                grantor_fill: self.fill(
+                    l.id.grantor,
+                    l.grantor.status,
+                    l.grantor.display_expiry,
+                    t,
+                ),
                 grantee_fill: self.fill(l.id.grantee, l.grantee.status, l.grantee.hold_expiry, t),
             })
             .collect();
@@ -370,6 +385,9 @@ impl Engine {
 
     /// Fraction of lease life remaining for one party at global time `t`, as a
     /// value in `0.0..1.0`. Zero unless the party considers the lease active.
+    /// `expiry_local` is the party's display expiry — `hold_expiry` for a
+    /// grantee, `display_expiry` for a grantor — both one `t_lease` span from
+    /// their last proof, so the fill spans the full bar and drains cleanly.
     fn fill(&self, node: NodeId, status: LeaseStatus, expiry_local: Time, t: Time) -> f64 {
         if status != LeaseStatus::Active {
             return 0.0;
@@ -758,9 +776,12 @@ impl Engine {
         }
         self.leases[i].grantor.status = LeaseStatus::Active;
         // Activation is the first proof the grantee is reachable; arm the
-        // renew-reply liveness clock from here.
-        self.leases[i].grantor.last_reply = self.local(self.leases[i].id.grantor);
-        self.leases[i].grantor.next_renew_due = self.local(self.leases[i].id.grantor);
+        // renew-reply liveness clock from here, and start the display countdown
+        // at a full lease span from this proof (mirrors the grantee's hold).
+        let d = self.local(self.leases[i].id.grantor);
+        self.leases[i].grantor.last_reply = d;
+        self.leases[i].grantor.next_renew_due = d;
+        self.leases[i].grantor.display_expiry = d + self.params().t_lease;
         self.emit(
             self.now,
             EventKind::GrantorLease {
@@ -824,8 +845,10 @@ impl Engine {
         // possible expiry, which `tightened` already dominates.
         self.leases[i].grantor.grant_expiry = self.leases[i].grantor.grant_expiry.min(tightened);
         // A reply proves the grantee is still reachable; refresh the liveness
-        // clock so `expire_stale_renews` only fires on a genuinely silent link.
+        // clock so `expire_stale_renews` only fires on a genuinely silent link,
+        // and refill the display countdown one lease span past this fresh proof.
         self.leases[i].grantor.last_reply = d;
+        self.leases[i].grantor.display_expiry = d + p.t_lease;
     }
 
     /// Grantee receives `Revoke`: drop the lease immediately.

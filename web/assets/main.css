@@ -386,11 +386,11 @@ body {
 .pg-row {
     display: flex;
     align-items: center;
-    gap: 0.85rem;
+    gap: 0.55rem;
 }
 
 .pg-label {
-    flex: 0 0 5.5rem;
+    flex: 0 0 4.5rem;
     font-size: 0.85rem;
     font-weight: 600;
     color: var(--muted);
@@ -545,8 +545,11 @@ body {
 .pg-stage {
     position: relative;
     width: 100%;
+    /* Full container width, as before. Taller than the old 460px cap so 9-node,
+       everything-on scenarios have more vertical room; the aspect-ratio keeps it
+       square on narrower viewports where width falls below the height cap. */
     aspect-ratio: 1 / 1;
-    max-height: 460px;
+    max-height: 580px;
     margin-top: 0.5rem;
     background: var(--surface);
     border: 1px solid var(--border);
@@ -633,6 +636,56 @@ body {
 
 .pg-tconst:hover::after,
 .pg-tconst:hover::before {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* A hoverable hint marker: a help cursor, with the same dark tooltip bubble +
+   arrow as `.pg-tconst`. Applied to the control-row labels and the "Grants?"
+   header (via `data-hint`) to explain each knob. */
+.pg-hint {
+    position: relative;
+    cursor: help;
+}
+
+.pg-hint::after {
+    content: attr(data-hint);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    z-index: 20;
+    max-width: 18rem;
+    width: max-content;
+    padding: 0.3rem 0.5rem;
+    background: var(--nav-bg);
+    color: var(--nav-text);
+    border-radius: 6px;
+    font-family: var(--font-sans);
+    font-size: 0.78rem;
+    font-weight: 400;
+    line-height: 1.35;
+    white-space: normal;
+    box-shadow: 0 2px 8px rgba(16, 35, 63, 0.25);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease;
+}
+
+.pg-hint::before {
+    content: "";
+    position: absolute;
+    bottom: calc(100% + 3px);
+    left: 1rem;
+    z-index: 20;
+    border: 5px solid transparent;
+    border-top-color: var(--nav-bg);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease;
+}
+
+.pg-hint:hover::after,
+.pg-hint:hover::before {
     opacity: 1;
     visibility: visible;
 }
@@ -773,6 +826,144 @@ body {
         transform: translate(-50%, -50%) scale(1);
         opacity: 1;
     }
+}
+
+/* Countdown timer bars beside a node disk, laid out in two short columns (OUT
+   grants / IN holds). Centered on the disk, then pushed radially *outward* from
+   the cluster center by --tx/--ty (set inline per node) into the empty region
+   outside the ring, so they clear the lease arrows running through the interior.
+   Rides along as the ring re-lays-out. */
+.pg-node-timers {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%) translate(var(--tx, 0), var(--ty, 0));
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 0.45rem;
+    pointer-events: none;
+    z-index: 1;
+}
+
+/* One column of same-role bars under an OUT / IN header. */
+.pg-timer-col {
+    display: flex;
+    flex-direction: column;
+    gap: 0.18rem;
+    align-items: stretch;
+}
+
+/* Column header: the role word, color-coded, above its bars. Nudged right with
+   a little left padding so it sits over the bar rather than the `→N` label. */
+.pg-timer-colhead {
+    font-size: 0.58rem;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0.04em;
+    text-align: center;
+    text-transform: uppercase;
+    padding-left: 0.85rem;
+}
+
+.pg-timer-col.is-out .pg-timer-colhead {
+    color: var(--grantor);
+}
+
+.pg-timer-col.is-in .pg-timer-colhead {
+    color: var(--grantee);
+}
+
+/* One cell: a small `→N` / `←N` endpoint label next to the bar. */
+.pg-timer-cell {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    pointer-events: auto;
+    cursor: help;
+}
+
+/* The endpoint label. Tabular digits keep the id from nudging the bar. */
+.pg-timer-label {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    min-width: 0.95rem;
+    font-size: 0.62rem;
+    font-weight: 600;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+/* The bar itself: an empty track that a colored fill drains within. A slightly
+   thicker, darker border makes each bar read clearly against the surface. */
+.pg-timer {
+    position: relative;
+    width: 1.9rem;
+    height: 0.3rem;
+    border-radius: 0.15rem;
+    background: var(--surface);
+    border: 1.5px solid var(--muted);
+    overflow: hidden;
+}
+
+/* The draining fill; its width is set inline from the remaining-life fraction,
+   easing down smoothly as the lease counts toward expiry. Anchored to the left
+   edge so it always drains right-to-left. */
+.pg-timer-fill {
+    position: absolute;
+    inset: 0;
+    right: auto;
+    border-radius: inherit;
+    transition: width 0.12s linear;
+}
+
+.pg-timer-col.is-out .pg-timer-fill {
+    background: var(--grantor);
+}
+
+.pg-timer-col.is-in .pg-timer-fill {
+    background: var(--grantee);
+}
+
+/* An inactive lease (guarding / idle / expired): the bar is filled solid gray
+   rather than left empty, so it reads as "no live countdown" and not as an
+   almost-drained active bar. Selector kept specific enough to override the
+   per-column role colors above. */
+.pg-timer-col.is-out .pg-timer-fill.is-inactive,
+.pg-timer-col.is-in .pg-timer-fill.is-inactive {
+    width: 100%;
+    background: var(--edge);
+}
+
+/* Hover tooltip on a timer cell (reuses the tconst tooltip look). */
+.pg-timer-cell::after {
+    content: attr(data-hint);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    padding: 0.28rem 0.45rem;
+    background: var(--nav-bg);
+    color: var(--nav-text);
+    border-radius: 6px;
+    font-size: 0.72rem;
+    line-height: 1.3;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(16, 35, 63, 0.25);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease;
+}
+
+.pg-timer-cell:hover::after {
+    opacity: 1;
+    visibility: visible;
 }
 
 /* ---- Run bar: Play button + timeline slider + status ----------------- */
@@ -973,8 +1164,8 @@ body {
    the chip itself is transparent so the icon shape reads. */
 .pg-msg {
     position: absolute;
-    width: 1.8rem;
-    height: 1.8rem;
+    width: 1.55rem;
+    height: 1.55rem;
     transform: translate(-50%, -50%);
     pointer-events: none;
     z-index: 3;
@@ -1045,8 +1236,8 @@ body {
 /* Revoke keeps the old filled dot, centered in the chip. */
 .pg-msg-dot {
     display: block;
-    width: 1.15rem;
-    height: 1.15rem;
+    width: 1rem;
+    height: 1rem;
     margin: auto;
     border-radius: 50%;
     background: currentColor;
@@ -1058,10 +1249,10 @@ body {
    glyph; the thumb itself is the phase color. */
 .pg-msg-badge {
     position: absolute;
-    top: -0.32rem;
-    right: -0.42rem;
-    width: 1.3rem;
-    height: 1.3rem;
+    top: -0.28rem;
+    right: -0.36rem;
+    width: 1.12rem;
+    height: 1.12rem;
     display: grid;
     place-items: center;
     border-radius: 50%;
@@ -1070,8 +1261,8 @@ body {
 }
 
 .pg-msg-badge-icon {
-    width: 0.98rem;
-    height: 0.98rem;
+    width: 0.84rem;
+    height: 0.84rem;
     fill: currentColor;
 }
 
@@ -1261,10 +1452,10 @@ body {
     margin-top: 0.3rem;
 }
 
-/* Header pinned to the far left, vertically centered against the whole group. */
+/* Header pinned near the left, vertically centered against the whole group. */
 .pg-grants-header {
     position: absolute;
-    left: 0;
+    left: 1rem;
     top: 50%;
     transform: translateY(-50%);
     font-size: 0.85rem;

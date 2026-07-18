@@ -237,12 +237,138 @@ fn stem(e: Edge) -> Edge {
     }
 }
 
+// ---- Timer-bar layout geometry ---------------------------------------------
+// Each node's countdown stack is pushed radially into the ring's *outer* band.
+// The stack is a small two-column grid — an OUT column (as-grantor bars) beside
+// an IN column (as-grantee bars), each capped by a header cell — so its row count
+// is `max(out, in)`, not `out + in`, keeping busy nodes short. Its bars are
+// rem-sized (physical) while node positions are unit-canvas fractions, so two
+// things adapt to a node's `(out, inc)` counts and radial direction: its push
+// distance (`timer_offset_rem`, enough to clear its own disk) and the whole
+// ring's radius (`ring_scale`, shrunk so the busiest node's farthest bar still
+// lands inside the clipped stage). All sizes mirror the CSS.
+
+/// One rem as a fraction of the stage box. `.pg-stage` is full-width, its height
+/// capped at 580px, so it renders ~580px tall on desktop and square (= its
+/// width) on narrower viewports; with 1rem ≈ 17px we assume a conservative 520px
+/// so the fit math stays on the safe side as the stage shrinks. Converts rem bar
+/// geometry to unit space.
+const REM_UNIT: f64 = 17.0 / 520.0;
+/// Half the 2.1rem node disk (`.pg-node`).
+const DISK_R_REM: f64 = 1.05;
+/// One grid row tall (`.pg-timer-cell`) plus the inter-row gap.
+const ROW_H_REM: f64 = 0.7;
+const ROW_GAP_REM: f64 = 0.18;
+/// One column wide: the `→N` row-label (`min-width: 0.95rem`) + its gap to the
+/// bar (`0.2rem`, rounded up to `0.26` for a hair of slack) + the bar (`1.9rem`).
+const COL_W_REM: f64 = 0.95 + 0.26 + 1.9;
+const COL_GAP_REM: f64 = 0.45;
+/// Breathing room between a disk and its stack.
+const CLEAR_REM: f64 = 0.45;
+/// Keep every bar at least this far (unit) inside the stage edge.
+const RING_MARGIN: f64 = 0.015;
+/// The radius `frame::ring_layout` places nodes at; the ring scales relative to
+/// it, never collapsing below `MIN_SCALE` of it (absurd bar counts clip a little
+/// rather than piling the nodes onto the center).
+const BASE_RING_R: f64 = 0.38;
+const MIN_SCALE: f64 = 0.45;
+
+/// Row count of a node's two-column stack: the taller of its OUT / IN columns.
+fn stack_rows(out: usize, inc: usize) -> usize {
+    out.max(inc)
+}
+
+/// Column count: 1 if the node is only a grantor or only a grantee, 2 if both.
+fn stack_cols(out: usize, inc: usize) -> usize {
+    usize::from(out > 0) + usize::from(inc > 0)
+}
+
+/// Half the stack's height (rem): its bar rows plus the one header row.
+fn stack_half_h_rem(out: usize, inc: usize) -> f64 {
+    let rows = stack_rows(out, inc);
+    if rows == 0 {
+        return 0.0;
+    }
+    let tall = (rows + 1) as f64; // + header row
+    (tall * ROW_H_REM + (tall - 1.0) * ROW_GAP_REM) / 2.0
+}
+
+/// Half the stack's width (rem): its 1 or 2 columns and the gap between them.
+fn stack_half_w_rem(out: usize, inc: usize) -> f64 {
+    let cols = stack_cols(out, inc) as f64;
+    if cols == 0.0 {
+        return 0.0;
+    }
+    (cols * COL_W_REM + (cols - 1.0) * COL_GAP_REM) / 2.0
+}
+
+/// Radial push (rem) that clears a node's stack off its disk when pushed along
+/// the unit direction `(ux, uy)`. The axis-aligned stack's extent *along* that
+/// direction is `|ux|·halfW + |uy|·halfH`, so a side node needs the stack's
+/// half-width out of the way and a top/bottom node its half-height.
+fn timer_offset_rem(out: usize, inc: usize, ux: f64, uy: f64) -> f64 {
+    if stack_rows(out, inc) == 0 {
+        return 0.0;
+    }
+    let along = ux.abs() * stack_half_w_rem(out, inc) + uy.abs() * stack_half_h_rem(out, inc);
+    DISK_R_REM + CLEAR_REM + along
+}
+
+/// Largest ring scale `k` (fraction of `BASE_RING_R`) at which this node's stack
+/// box stays within the stage margins. With the node at `0.5 + k·R·dir` and the
+/// stack centered `off` further along `dir`, each box edge is linear in `k`;
+/// this returns the smallest `k` any outward edge permits (∞ if the node has no
+/// bars, i.e. nothing to constrain).
+fn node_max_scale(ux: f64, uy: f64, out: usize, inc: usize) -> f64 {
+    if stack_rows(out, inc) == 0 {
+        return f64::INFINITY;
+    }
+    let off = timer_offset_rem(out, inc, ux, uy) * REM_UNIT;
+    let hw = stack_half_w_rem(out, inc) * REM_UNIT;
+    let hh = stack_half_h_rem(out, inc) * REM_UNIT;
+    let (lo, hi) = (RING_MARGIN, 1.0 - RING_MARGIN);
+    // For one axis: box center c = 0.5 + (off + k·R)·u, edges c ± half. Solve the
+    // *outward* edge (the one k pushes toward a wall) for k; the inward edge is
+    // never binding here. `u == 0` ⇒ that axis doesn't move with k.
+    let axis = |u: f64, half: f64| -> f64 {
+        if u > 0.0 {
+            (hi - half - 0.5 - off * u) / (BASE_RING_R * u)
+        } else if u < 0.0 {
+            (lo + half - 0.5 - off * u) / (BASE_RING_R * u)
+        } else {
+            f64::INFINITY
+        }
+    };
+    axis(ux, hw).min(axis(uy, hh))
+}
+
 /// A lease edge to draw during playback, colored by the grantee's held status.
 #[derive(Debug, Clone, Copy)]
 struct LeaseEdge {
     e: Edge,
     status: LeaseStatus,
     /// Grantee's remaining lease life, `0.0..1.0`, for a countdown fade.
+    fill: f64,
+}
+
+/// Which side of a lease a countdown bar reflects: the timer a node runs as the
+/// grantor of a lease, or the one it runs as the grantee of one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimerRole {
+    Grantor,
+    Grantee,
+}
+
+/// One countdown timer bar drawn beside a node disk during playback: a single
+/// lease the node takes part in, viewed from one side. `fill` in `0.0..1.0` is
+/// the fraction of lease life remaining (0 unless that side counts it active).
+#[derive(Debug, Clone, Copy)]
+struct TimerBar {
+    /// The lease's other endpoint — grantee for a grantor bar, grantor for a
+    /// grantee bar. Named in the hover tooltip.
+    other: NodeId,
+    role: TimerRole,
+    status: LeaseStatus,
     fill: f64,
 }
 
@@ -262,6 +388,35 @@ fn grant_count(f: &Frame, node: NodeId) -> usize {
         .iter()
         .filter(|b| b.grantee == node && b.grantee_status == LeaseStatus::Active)
         .count()
+}
+
+/// Countdown bars for one node in a frame: one per lease it grants (as-grantor)
+/// and one per lease it holds (as-grantee). Grantor bars come first, then
+/// grantee bars; within each group leases keep their frame order, so a node's
+/// bars stay in a stable slot across frames. Every declared lease appears in
+/// every frame, so this list is length-stable for a given scenario.
+fn node_timers(f: &Frame, node: NodeId) -> Vec<TimerBar> {
+    let grantor = f
+        .leases
+        .iter()
+        .filter(|b| b.grantor == node)
+        .map(|b| TimerBar {
+            other: b.grantee,
+            role: TimerRole::Grantor,
+            status: b.grantor_status,
+            fill: b.grantor_fill,
+        });
+    let grantee = f
+        .leases
+        .iter()
+        .filter(|b| b.grantee == node)
+        .map(|b| TimerBar {
+            other: b.grantor,
+            role: TimerRole::Grantee,
+            status: b.grantee_status,
+            fill: b.grantee_fill,
+        });
+    grantor.chain(grantee).collect()
 }
 
 /// Run-length encode a node's active-grant count over the recorded `frames`.
@@ -683,18 +838,76 @@ pub fn Playground() -> Element {
 
     let n = node_count();
     let maj = majority(n);
-    let pts = ring_layout(n);
     let runnable = has_leases(n, &grantors.read(), &grantees.read());
     // The "leader" is the smallest-id grantee (an all-to-one leader is the sole
     // grantee; more generally we just crown the lowest-id one). Marked with a
     // crown in the topology, in both the static and playback views.
     let leader: Option<usize> = grantees.read().iter().copied().find(|&id| id < n);
 
+    // How many countdown bars each node shows, split by column: `(out, inc)` =
+    // leases it grants (as-grantor) and leases it holds (as-grantee) — the same
+    // pairs `build_scenario` declares (every grantor×grantee, `g != h`). Derived
+    // from the selection sets, so it's stable across a run and known even while
+    // idle. The two-column stack is `max(out, inc)` rows tall.
+    let bar_counts: Vec<(usize, usize)> = {
+        let gs = grantors.read();
+        let hs = grantees.read();
+        (0..n)
+            .map(|node| {
+                let out = if gs.contains(&node) {
+                    hs.iter().filter(|&&h| h != node).count()
+                } else {
+                    0
+                };
+                let inc = if hs.contains(&node) {
+                    gs.iter().filter(|&&g| g != node).count()
+                } else {
+                    0
+                };
+                (out, inc)
+            })
+            .collect()
+    };
+
     // Snapshot run state for this render.
     let ph = phase();
     let rec_len = frames.read().len();
     let cur = cursor().min(rec_len.saturating_sub(1));
     let current_frame: Option<Frame> = frames.read().get(cur).cloned();
+
+    // Node positions. `ring_layout` puts nodes on the `BASE_RING_R` circle; in
+    // the playback view (where the timer stacks appear) the ring is adaptively
+    // shrunk toward center so the busiest node's stack still clears its disk
+    // *and* stays inside the clipped stage — the scale is the tightest per-node
+    // fit, clamped so it never collapses onto center. While editing (no bars)
+    // the ring keeps its full radius; nodes glide between the two on the
+    // existing `.pg-node` position transition when a run starts/stops.
+    let base_pts = ring_layout(n);
+    let ring_scale = if current_frame.is_some() {
+        base_pts
+            .iter()
+            .enumerate()
+            .map(|(id, p)| {
+                let (dx, dy) = (p.x - 0.5, p.y - 0.5);
+                let len = (dx * dx + dy * dy).sqrt();
+                if len < 1e-6 {
+                    return f64::INFINITY;
+                }
+                let (out, inc) = bar_counts[id];
+                node_max_scale(dx / len, dy / len, out, inc)
+            })
+            .fold(1.0_f64, f64::min)
+            .clamp(MIN_SCALE, 1.0)
+    } else {
+        1.0
+    };
+    let pts: Vec<Point> = base_pts
+        .iter()
+        .map(|p| Point {
+            x: 0.5 + (p.x - 0.5) * ring_scale,
+            y: 0.5 + (p.y - 0.5) * ring_scale,
+        })
+        .collect();
     // Cursor position as a 0..1 fraction of the run, for the playhead markers
     // drawn on the grant bars in sync with the timeline slider handle.
     let cursor_frac = if rec_len > 1 {
@@ -846,11 +1059,27 @@ pub fn Playground() -> Element {
         })
         .collect();
 
+    // Per-node countdown timer bars for playback: one bar per lease the node
+    // grants (as-grantor) and one per lease it holds (as-grantee), each showing
+    // its remaining life. Rendered stacked beside the node disk on the canvas.
+    let timers: Vec<Vec<TimerBar>> = (0..n)
+        .map(|node| {
+            current_frame
+                .as_ref()
+                .map(|f| node_timers(f, node))
+                .unwrap_or_default()
+        })
+        .collect();
+
     rsx! {
         div { class: "pg-root",
             // Row 1: presets.
             div { class: "pg-row",
-                span { class: "pg-label", "Preset" }
+                span {
+                    class: "pg-label pg-hint",
+                    "data-hint": "Preset scenario",
+                    "Preset"
+                }
                 div { class: "pg-pills",
                     for p in [
                         Preset::OneToOne,
@@ -858,7 +1087,8 @@ pub fn Playground() -> Element {
                         Preset::Leader,
                         Preset::Quorum,
                         Preset::Roster,
-                    ] {
+                    ]
+                    {
                         button {
                             key: "{p.label()}",
                             class: if preset() == Some(p) { "pg-pill is-on" } else { "pg-pill" },
@@ -871,7 +1101,11 @@ pub fn Playground() -> Element {
 
             // Row 2: node-count slider with majority readout.
             div { class: "pg-row",
-                span { class: "pg-label", "Nodes" }
+                span {
+                    class: "pg-label pg-hint",
+                    "data-hint": "Number of nodes; majority is ⌊n/2⌋+1 (incl. self)",
+                    "Nodes"
+                }
                 input {
                     class: "pg-slider",
                     r#type: "range",
@@ -889,13 +1123,14 @@ pub fn Playground() -> Element {
                     strong { "{n}" }
                     " nodes · majority = "
                     strong { "{maj}" }
-                    " (incl. self)"
+                    "  (incl. self)"
                 }
             }
 
             // Row 3: grantor selection.
             SelectBar {
                 label: "Grantors",
+                hint: "Nodes that grant leases out",
                 n,
                 selected: grantors,
                 on_toggle: move |id| {
@@ -913,6 +1148,7 @@ pub fn Playground() -> Element {
             // Row 4: grantee selection.
             SelectBar {
                 label: "Grantees",
+                hint: "Nodes that receive lease grants",
                 n,
                 selected: grantees,
                 on_toggle: move |id| {
@@ -931,7 +1167,11 @@ pub fn Playground() -> Element {
             // Guard / Renew messages; changing one discards any run but leaves
             // the scenario shape (and its preset) intact.
             div { class: "pg-row",
-                span { class: "pg-label", "Msg drop" }
+                span {
+                    class: "pg-label pg-hint",
+                    "data-hint": "Chance of randomly dropping a msg of type",
+                    "Msg drop"
+                }
                 div { class: "pg-fails",
                     FailSwitch {
                         label: "Guard",
@@ -956,7 +1196,11 @@ pub fn Playground() -> Element {
             // and whether that write is disruptive. Like the failure switches,
             // changing one discards the run but keeps the scenario shape.
             div { class: "pg-row",
-                span { class: "pg-label", "Writes" }
+                span {
+                    class: "pg-label pg-hint",
+                    "data-hint": "How often the leader serves a write, and will writes disrupt leases",
+                    "Writes"
+                }
                 div { class: "pg-fails",
                     WriteEverySwitch {
                         selected: write_every(),
@@ -1127,14 +1371,19 @@ pub fn Playground() -> Element {
                                     MsgFate::Dropped => drop_glyph_opacity(m.progress),
                                     MsgFate::Delivered => msg_opacity(m.progress),
                                 };
+                                // Re-derive the glyph position from the *scaled*
+                                // node positions (the engine's `m.pos` rides the
+                                // unscaled ring), so messages fly between disks as
+                                // drawn rather than from their original spots.
+                                let p = lerp(pts[m.from], pts[m.to], m.progress);
                                 rsx! {
                                     div {
                                         key: "m{i}",
                                         class: msg_class(m.kind),
                                         style: format!(
                                             "left: {:.3}%; top: {:.3}%; opacity: {:.3};",
-                                            m.pos.x * 100.0,
-                                            m.pos.y * 100.0,
+                                            p.x * 100.0,
+                                            p.y * 100.0,
                                             opacity,
                                         ),
                                         MsgGlyph { kind: m.kind }
@@ -1152,12 +1401,7 @@ pub fn Playground() -> Element {
                                             div {
                                                 key: "d{i}",
                                                 class: "pg-drop",
-                                                style: format!(
-                                                    "left: {:.3}%; top: {:.3}%; --bp: {:.3};",
-                                                    p.x * 100.0,
-                                                    p.y * 100.0,
-                                                    bp,
-                                                ),
+                                                style: format!("left: {:.3}%; top: {:.3}%; --bp: {:.3};", p.x * 100.0, p.y * 100.0, bp),
                                                 span { class: "pg-drop-ring" }
                                                 svg { class: "pg-drop-x", view_box: "0 0 24 24",
                                                     path { d: "M6 6 L18 18 M18 6 L6 18" }
@@ -1195,6 +1439,98 @@ pub fn Playground() -> Element {
                                 Crown {}
                             }
                             span { class: "pg-node-id", "{id}" }
+                            // Countdown timer bars beside the disk, in two short
+                            // columns: an OUT column (orange, leases this node
+                            // grants as grantor) and an IN column (green, leases
+                            // it holds as grantee). Two columns keep the stack
+                            // short — `max(out, in)` rows, not `out + in` — so busy
+                            // nodes don't grow tall. Each bar's fill drains with
+                            // the remaining lease life.
+                            if !timers[id].is_empty() {
+                                div {
+                                    // The stack sits radially *outward* from the
+                                    // cluster center, past the disk — the empty
+                                    // region outside the ring — so it never crosses
+                                    // the lease arrows running through the interior.
+                                    // `--tx`/`--ty` push it along the node's outward
+                                    // unit vector by an offset adapted to this
+                                    // node's stack size and direction
+                                    // (`timer_offset_rem`), so it clears its own
+                                    // disk. Comma-free scalars; the stylesheet does
+                                    // the `translate` (Dioxus's inline style parser
+                                    // drops comma-bearing values).
+                                    class: "pg-node-timers",
+                                    style: {
+                                        // Direction from center is taken on the
+                                        // *unscaled* ring so it's independent of
+                                        // the adaptive shrink (pure angle).
+                                        let (dx, dy) = (base_pts[id].x - 0.5, base_pts[id].y - 0.5);
+                                        let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                                        let (ux, uy) = (dx / len, dy / len);
+                                        let (out, inc) = bar_counts[id];
+                                        let off = timer_offset_rem(out, inc, ux, uy);
+                                        format!("--tx: {:.3}rem; --ty: {:.3}rem;", ux * off, uy * off)
+                                    },
+                                    for (role , cls , arrow , head) in [
+                                        (TimerRole::Grantor, "pg-timer-col is-out", "\u{2192}", "OUT"),
+                                        (TimerRole::Grantee, "pg-timer-col is-in", "\u{2190}", "IN"),
+                                    ] {
+                                        // One column per role, each capped by an
+                                        // OUT / IN header; omitted if this node has
+                                        // no bars of that role.
+                                        if timers[id].iter().any(|t| t.role == role) {
+                                            div { key: "{head}", class: cls,
+                                                span { class: "pg-timer-colhead", "{head}" }
+                                                for (j , tb) in timers[id]
+                                                    .iter()
+                                                    .filter(|t| t.role == role)
+                                                    .enumerate()
+                                                {
+                                                    // Each cell: a small `→N`/`←N`
+                                                    // endpoint label and the bar.
+                                                    div {
+                                                        key: "{j}",
+                                                        class: "pg-timer-cell",
+                                                        "data-hint": format!(
+                                                            "as {} node {} · {}",
+                                                            match role {
+                                                                TimerRole::Grantor => "grantor to",
+                                                                TimerRole::Grantee => "grantee of",
+                                                            },
+                                                            tb.other,
+                                                            match tb.status {
+                                                                LeaseStatus::Active => "active",
+                                                                LeaseStatus::Guarding => "guarding",
+                                                                LeaseStatus::Expired => "expired",
+                                                                LeaseStatus::Inactive => "idle",
+                                                            },
+                                                        ),
+                                                        span { class: "pg-timer-label",
+                                                            "{arrow}"
+                                                            "{tb.other}"
+                                                        }
+                                                        div { class: "pg-timer",
+                                                            // An inactive lease has no
+                                                            // countdown, so fill the
+                                                            // track fully in gray —
+                                                            // distinct from an active
+                                                            // bar drained near empty.
+                                                            if tb.status == LeaseStatus::Active {
+                                                                div {
+                                                                    class: "pg-timer-fill",
+                                                                    style: "width: {tb.fill * 100.0}%;",
+                                                                }
+                                                            } else {
+                                                                div { class: "pg-timer-fill is-inactive" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 } else {
@@ -1269,17 +1605,9 @@ pub fn Playground() -> Element {
                     // Primary button cycles Play (idle/capped) → Pause (while
                     // running) → Resume (while paused).
                     if generating {
-                        button {
-                            class: "pg-btn is-stop",
-                            onclick: on_pause,
-                            "Pause"
-                        }
+                        button { class: "pg-btn is-stop", onclick: on_pause, "Pause" }
                     } else if paused {
-                        button {
-                            class: "pg-btn",
-                            onclick: on_resume,
-                            "Resume"
-                        }
+                        button { class: "pg-btn", onclick: on_resume, "Resume" }
                     } else {
                         button {
                             class: "pg-btn",
@@ -1373,7 +1701,11 @@ pub fn Playground() -> Element {
             // held). Each segment tooltips its interval length and grant count.
             // A "Grants?" header sits vertically centered to the left of the group.
             div { class: "pg-grants",
-                span { class: "pg-grants-header", "Grants?" }
+                span {
+                    class: "pg-grants-header pg-hint",
+                    "data-hint": "Per node, how many grants it holds as a grantee over the run — a green segment per interval, darker with more grants held, empty when it holds none",
+                    "Grants?"
+                }
                 div { class: "pg-grantbars",
                     for id in 0..n {
                         div { key: "{id}", class: "pg-grantbar-row",
@@ -1408,22 +1740,54 @@ pub fn Playground() -> Element {
 
             p { class: "pg-caption",
                 "Hardcoded: "
-                TConst { name: "expire", hint: "Lease expiration timeout", ticks: "1500 ticks" }
+                TConst {
+                    name: "expire",
+                    hint: "Lease expiration timeout",
+                    ticks: "1500 ticks",
+                }
                 " ≈ "
-                TConst { name: "guard", hint: "Guard phase timeout", ticks: "1500 ticks" }
+                TConst {
+                    name: "guard",
+                    hint: "Guard phase timeout",
+                    ticks: "1500 ticks",
+                }
                 " ≈ 2.5 x "
-                TConst { name: "renew", hint: "Lease renewal interval", ticks: "600 ticks" }
+                TConst {
+                    name: "renew",
+                    hint: "Lease renewal interval",
+                    ticks: "600 ticks",
+                }
                 span { class: "pg-sep", ";" }
-                TConst { name: "renew", hint: "Lease renewal interval", ticks: "600 ticks" }
+                TConst {
+                    name: "renew",
+                    hint: "Lease renewal interval",
+                    ticks: "600 ticks",
+                }
                 " ≈ 3 x "
-                TConst { name: "msg", hint: "Average message delivery delay", ticks: "~200 ticks avg" }
+                TConst {
+                    name: "msg",
+                    hint: "Average message delivery delay",
+                    ticks: "~200 ticks avg",
+                }
                 span { class: "pg-sep", ";" }
-                TConst { name: "msg", hint: "Average message delivery delay", ticks: "~200 ticks avg" }
+                TConst {
+                    name: "msg",
+                    hint: "Average message delivery delay",
+                    ticks: "~200 ticks avg",
+                }
                 " ≈ 2 x "
-                TConst { name: "Δ", hint: "Bounded clock drift", ticks: "100 ticks" }
+                TConst {
+                    name: "Δ",
+                    hint: "Bounded clock drift",
+                    ticks: "100 ticks",
+                }
                 " with ±40% jitter"
                 span { class: "pg-sep", ";" }
-                TConst { name: "Δ", hint: "Bounded clock drift", ticks: "100 ticks" }
+                TConst {
+                    name: "Δ",
+                    hint: "Bounded clock drift",
+                    ticks: "100 ticks",
+                }
                 " is 100 ticks."
             }
         }
@@ -1455,13 +1819,7 @@ fn FailSwitch(
         div { class: "pg-fail",
             span { class: "pg-fail-label", "{label}" }
             div { class: "pg-fail-pills",
-                for r in [
-                    FailRate::Off,
-                    FailRate::Tiny,
-                    FailRate::Low,
-                    FailRate::Some,
-                    FailRate::All,
-                ] {
+                for r in [FailRate::Off, FailRate::Tiny, FailRate::Low, FailRate::Some, FailRate::All] {
                     button {
                         key: "{r.label()}",
                         class: if selected == r { "pg-fail-pill is-on" } else { "pg-fail-pill" },
@@ -1482,12 +1840,7 @@ fn WriteEverySwitch(selected: WriteEvery, on_select: EventHandler<WriteEvery>) -
         div { class: "pg-fail",
             span { class: "pg-fail-label", "Every" }
             div { class: "pg-fail-pills",
-                for w in [
-                    WriteEvery::Never,
-                    WriteEvery::Slow,
-                    WriteEvery::Mid,
-                    WriteEvery::Fast,
-                ] {
+                for w in [WriteEvery::Never, WriteEvery::Slow, WriteEvery::Mid, WriteEvery::Fast] {
                     button {
                         key: "{w.label()}",
                         class: if selected == w { "pg-fail-pill is-on" } else { "pg-fail-pill" },
@@ -1520,10 +1873,12 @@ fn DisruptiveSwitch(selected: bool, on_select: EventHandler<bool>) -> Element {
     }
 }
 
-/// A row of per-node toggle buttons plus an "All" toggle.
+/// A row of per-node toggle buttons plus an "All" toggle. The label carries a
+/// hover `hint` explaining the role.
 #[component]
 fn SelectBar(
     label: &'static str,
+    hint: &'static str,
     n: usize,
     selected: Signal<BTreeSet<usize>>,
     on_toggle: EventHandler<usize>,
@@ -1532,7 +1887,7 @@ fn SelectBar(
     let all_selected = *selected.read() == (0..n).collect::<BTreeSet<usize>>();
     rsx! {
         div { class: "pg-row",
-            span { class: "pg-label", "{label}" }
+            span { class: "pg-label pg-hint", "data-hint": "{hint}", "{label}" }
             div { class: "pg-ids",
                 for id in 0..n {
                     button {
