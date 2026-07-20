@@ -2,13 +2,13 @@
 
 The Dioxus static website for the Distributed Lease 101 walkthrough. It renders entirely client-side (WASM) and runs the `lease_sim` engine live in the browser to drive animations. See [simulator.md](simulator.md) for the engine and [algorithm.md](algorithm.md) for the algorithms being illustrated.
 
-Two client-side routes share one banner: the home walkthrough (`/`) and a standalone simulator playground (`/sim`). Each route sets the browser-tab title via `document::Title` — `"Bodega Consensus"` on `/`, and `"Lease Sim Playground"` on `/sim`.
+Two visible client-side routes share one banner: the home walkthrough (`/`) and a standalone simulator playground (`/sim`). Each sets the browser-tab title via `document::Title` — `"Bodega Consensus"` on `/`, and `"Lease Sim Playground"` on `/sim`. A third, unlinked route, `/capture/:name`, sits *outside* the banner layout and hosts a bare, frame-stepped canvas used only by the offline GIF-capture tool (see [GIF capture](#gif-capture)).
 
 ## Goals
 
 - A single, scrollable page: a friendly walkthrough post, top to bottom.
 - Static hosting only — no server, no backend. Just `index.html` + WASM + assets. A `404.html` copy of the shell (added in the deploy workflow) lets client-side deep links like `/sim` survive direct hits and refreshes on GitHub Pages.
-- Animations run **live** on the simulation engine (not pre-rendered). The blog post version uses pre-generated GIFs instead; this site does not.
+- Animations run **live** on the simulation engine (not pre-rendered). The blog post version uses pre-generated GIFs instead — but those GIFs are *captured from this same live canvas* (see [GIF capture](#gif-capture)), so they match it exactly.
 - Lightweight and fast to load.
 
 ## Tech stack
@@ -24,6 +24,9 @@ This repo is a Cargo workspace:
 ```text
 Cargo.toml          # workspace root; also the `lease_sim` core lib package
 src/                # lease_sim core (engine, scenario, frame, ...)
+scripts/            # Python tooling (uv): gifcap.py (headless capture), bloggen.py (blog assembly)
+docs/gifs/          # captured scenario GIFs (output of gifcap.py)
+docs/blog/          # plain-markdown blog post (output of bloggen.py)
 web/                # the Dioxus app (package `lease_web`)
   Cargo.toml        # deps: dioxus + lease_sim (path = ".."); build-deps: pulldown-cmark, toml, serde
   Dioxus.toml       # dx app config (title, watch paths)
@@ -39,16 +42,16 @@ web/                # the Dioxus app (package `lease_web`)
     6-bodega.md         # level 06: roster leases co-designed with consensus
   src/
     main.rs         # entry point: launch Router + global assets (Root component)
-    components.rs   # routes (Home, Sim), Shell layout, Nav, section templates, widgets
+    components.rs   # routes (Home, Sim, Capture), Shell layout, Nav, section templates, widgets
     content.rs      # walkthrough data shapes; includes the build-generated SECTIONS
-    sim_view.rs     # shared canvas view layer: SimRun run loop, Topology, SimStage, RunBar, GrantBars
-    scenarios.rs    # hardcoded walkthrough scenario canvases (ScenarioCanvas + the name→spec registry)
+    sim_view.rs     # shared canvas view layer: SimRun run loop, generate_frames, Topology, SimStage, RunBar, GrantBars
+    scenarios.rs    # hardcoded walkthrough scenario canvases (ScenarioCanvas, Capture + the name→spec registry)
     playground.rs   # the /sim scenario builder + live sim (scenario-editing controls over sim_view)
   assets/
     main.css        # global stylesheet (loaded via asset!() macro)
 ```
 
-The web app depends on the `lease_sim` core via a path dependency, so the same engine that powers native GIF generation powers the in-browser animations.
+The web app depends on the `lease_sim` core via a path dependency; the same engine powers the in-browser animations and — via the `/capture` route screenshotted by `scripts/gifcap.py` — the blog-post GIFs.
 
 ## Walkthrough content
 
@@ -74,7 +77,7 @@ The walkthrough prose is authored per level in markdown (see [Walkthrough conten
 ## Components
 
 - `Root` — top-level; injects the global stylesheet asset, then mounts `Router::<Route>`.
-- `Route` — the routable enum: `Home {}` at `/` and `Sim {}` at `/sim`, both nested under the `Shell` layout.
+- `Route` — the routable enum: `Home {}` at `/` and `Sim {}` at `/sim`, both nested under the `Shell` layout; then `Capture { name }` at `/capture/:name`, placed after `#[end_layout]` so it renders with no banner/chrome (offline capture only).
 - `Shell` — layout wrapping every route: renders `Nav`, then the active route via `Outlet`.
 - `Home` — the walkthrough page: iterates `content::SECTIONS` (see [Walkthrough content](#walkthrough-content)), rendering each via `WalkthroughSection`.
 - `WalkthroughSection { section }` — renders one authored section: the plain heading (`kind == "intro"`) or the algo head — a small muted ordinal (`01`–`06`) and a small-caps pattern tag (`one-to-one`, `one-to-many` … `all-to-all`, `co-design`) — wrapping that section's ordered blocks.
@@ -82,6 +85,7 @@ The walkthrough prose is authored per level in markdown (see [Walkthrough conten
 - `Sim` — the standalone simulator playground page; hosts `Playground`.
 - `Playground` — the interactive scenario builder + live simulation (in `playground.rs`); owns the editing controls and drives the canvas through the shared `sim_view` widgets. See [Simulator playground](#simulator-playground).
 - `ScenarioCanvas { name }` — a self-contained walkthrough figure replaying a hardcoded scenario over the same shared `sim_view` widgets as the playground (in `scenarios.rs`). See [Scenario canvases](#scenario-canvases).
+- `Capture { name }` — the offline GIF-capture view (in `scenarios.rs`): a bare, externally frame-stepped `SimStage` with no chrome, driven by the capture tool. See [GIF capture](#gif-capture).
 - `SimStage { topology, frame }` / `RunBar { … }` / `GrantBars { … }` — the shared canvas view layer (in `sim_view.rs`): the animated (or static) canvas contents, the `[control | track | status]` run bar + time axis, and the per-node grant bars. Both `Playground` and `ScenarioCanvas` compose these, so the two displays are identical.
 - `Nav` — sticky dark-blue banner: "Bodega Consensus" brand on the left, external links (Paper, TLA+, Summerset, Web) and the `Sim*` route link on the right.
 - `Tradeoff { pro, con }` — the pro/con pair that motivates the next rung.
@@ -200,6 +204,26 @@ Wired scenarios:
 | `quorum-leases-write-disruption` | 04 quorum leases | same two-holder setup, then a disruptive write at t=2000 tears every lease down; on commit each grantor re-guards deterministically and renewing resumes (stops a lead-out past the commit, after ~3 fresh renew rounds; capped at 9000 ticks) |
 | `roster-leases` | 05 roster leases | 5 nodes, all-to-all: 20 leases (every ordered pair) (stops once every lease has renewed at least three rounds — the 60th `Renew` delivered; capped at 8000 ticks) |
 
+## GIF capture
+
+The blog-post GIFs are captured from the **live web canvas itself**, so a frame is pixel-identical to what a reader sees — no second renderer to keep in sync. See [simulator.md](simulator.md#gif-capture) for the full pipeline; the web-side pieces are:
+
+- **`/capture/:name` route** (`Capture` component, outside the `Shell` layout so there's no banner). It renders *only* the scenario's `.pg-stage` — same `fit_height`/`fit_pad` as the on-page figure, inside the same `.page` + `.sc-root` wrappers — so at desktop width the screenshot matches the site.
+- **Offline full-run frames.** Instead of the live playback loop, the route pre-generates every frame with `sim_view::generate_frames`, the offline twin of `use_sim_run`'s loop (same `FRAME_TICKS` stepping and `StopWhen` logic), so the captured sequence equals a live run's recording exactly.
+- **External stepping bridge.** A `use_future` installs `window.__setFrame(n)` over Dioxus's eval JS↔Rust channel, publishes `window.__frameCount` and a `window.__captureReady` flag, and mirrors the shown index into a `data-frame` attribute the driver polls before each screenshot.
+- **Capture-mode CSS.** A `.pg-capture` wrapper disables every transition/animation (`transition/animation: none !important`), so a stepped frame is the exact settled state at its tick, never a mid-tween smear.
+
+The tooling is Python (`scripts/gifcap.py`, via `uv` + Playwright + Pillow), plus `gifsicle` as an external CLI dependency for the final size-optimization pass (install via e.g. `brew install gifsicle`; skipped with a warning if absent). Captured at `--scale 2` for crisp text; the generated GIFs land in `docs/gifs/` as `lease-101-<name>.gif`.
+
+## Plain blog post
+
+`scripts/bloggen.py` assembles a single plain-markdown version of the walkthrough (`docs/blog/walkthrough.md`) from the same `content/*.md` sources the site uses — the static-file counterpart to the live page:
+
+- Sections are concatenated in reading order (the same list as `build.rs`), each an H2 (the intro gets a blog-only heading); no separator rules between them.
+- Each `:::figure <name>` is replaced by an `Example -- <title>:` caption followed by its captured GIF, referenced at the blog site's asset URL (`/assets/img/lease-101-<name>.gif`, which intentionally doesn't resolve in this repo); the scenario titles are read straight from `scenarios.rs` so they never drift.
+- The interactive `:::tradeoff` / `:::recap` widgets are rendered from front-matter as a pro/con list and a markdown table; the small inline math HTML (`.var` spans, `<sub>`) is converted to plain-markdown equivalents so the output is HTML-free, and site-relative links (e.g. `/sim`) are rewritten to their deployed URLs.
+- A `## References` section at the end holds the footnote definitions (`[^n]`) anchored to words in the prose.
+
 ## Styling
 
 - Single global `assets/main.css`, loaded via the `asset!()` macro so the build injects a content-hashed URL automatically.
@@ -234,5 +258,6 @@ When adding pages/routes, do nothing analytics-specific — they inherit the tag
 - [x] Playback controls (Play/Pause/Resume/Restart) + scrubbable timeline
 - [x] Shared canvas view layer (`sim_view`) factored out of the playground
 - [x] Live simulation canvas on the home walkthrough sections (scenario canvases): all walkthrough figures wired (§01–§05)
-- [ ] Node failure/recovery and per-link/per-node knobs in the playground (message-drop failure injection shipped)
+- [~] Node failure/recovery and per-link/per-node knobs in the playground (message-drop failure injection shipped)
 - [x] Release build + deployment (`.github/workflows/deploy.yml`: `dx build --release` → GitHub Pages, with CNAME + 404.html fallback)
+- [x] GIF capture (`/capture/:name` route + `scripts/gifcap.py`) → `docs/gifs/`, and the plain-markdown blog post (`scripts/bloggen.py`) → `docs/blog/walkthrough.md`

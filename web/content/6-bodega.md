@@ -32,7 +32,7 @@ seen = "bodega"
 new = true
 +++
 
-Co-designs consensus serving around the roster. A responder serves reads locally if a majority grant it ∧ its latest known write is in committed status. A write requires gathering accepts from responders and broadcasts commit notifications.
+Co-designs consensus serving around the roster. A responder serves reads locally if a majority grant it ∧ it is a responder according to the current roster ∧ its latest known write is in committed status. Write requires gathering accepts from responders and broadcasts commit notifications.
 
 Reads stay local through writes. The lease traffic is nearly free too: it *piggybacks on the heartbeats* that consensus replicas already exchange.
 

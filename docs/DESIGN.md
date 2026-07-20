@@ -13,7 +13,7 @@ Detailed design docs are in the `design/` subfolder, by component.
 - [x] Condensed summary of distributed leasing algorithms
 - [x] Rust distributed leases simulator code -> wasm
 - [x] Dioxus static webpage serving a concise walkthrough, annotated with animations
-- [ ] Markdown plain blog post version of the walkthrough, with gif figures
+- [x] Markdown plain blog post version of the walkthrough, with gif figures
 - [x] Reference links to our Bodega paper, the Summerset codebase, TLA+ specs, etc.
 - [x] Scripts for automation and generating everything
 - [ ] Verus-based formal verification of algorithm's local invariants

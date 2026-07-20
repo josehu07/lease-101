@@ -535,7 +535,7 @@ mod tests {
                 } => Some(ev.at),
                 _ => None,
             })
-            .last()
+            .next_back()
             .expect("at least one renew reply gets through");
 
         let renews_after_last_reply = events
@@ -821,14 +821,13 @@ mod tests {
                 to,
                 kind: MsgKind::Renew,
             } = ev.kind
+                && (to == 0 || to == 2)
             {
-                if to == 0 || to == 2 {
-                    *per_holder.entry(to).or_default().entry(from).or_default() += 1;
-                    total += 1;
-                    if total == 24 {
-                        twenty_fourth_at = Some(ev.at);
-                        break;
-                    }
+                *per_holder.entry(to).or_default().entry(from).or_default() += 1;
+                total += 1;
+                if total == 24 {
+                    twenty_fourth_at = Some(ev.at);
+                    break;
                 }
             }
         }

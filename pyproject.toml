@@ -4,7 +4,16 @@ version = "0.1.0"
 description = "Distribute Lease 101 Scripts"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    # Headless-browser frame capture (`scripts/gifcap.py`): drives Chromium over
+    # the real `/capture/:name` route so GIF frames are pixel-identical to the site.
+    "playwright>=1.48",
+    # GIF assembly from the captured PNG frames.
+    "pillow>=11.0",
+]
 
 [dependency-groups]
 dev = ["isort>=8.0.1", "ruff>=0.15.17"]
+
+[tool.ruff]
+line-length = 100

@@ -1,6 +1,6 @@
 # Lease Message Simulator
 
-The `lease_sim` Rust crate: a multi-node, message-passing lease simulator. It powers real-time WASM animations on the web (the engine runs live in-browser, not pre-rendered) and, planned, pre-generated GIFs for the blog post. See the algorithms it models in [algorithm.md](algorithm.md).
+The `lease_sim` Rust crate: a multi-node, message-passing lease simulator. It powers real-time WASM animations on the web (the engine runs live in-browser, not pre-rendered) and, via a headless-browser capture of that same web canvas, the pre-generated GIFs for the blog post (see [GIF capture](#gif-capture)). See the algorithms it models in [algorithm.md](algorithm.md).
 
 ## Goals
 
@@ -32,15 +32,16 @@ scenario  ──build──▶  Engine (DES, event heap)  ──▶  Event strea
                             │                              │
                             └──▶ Frame geometry (interpolated)
                                         │
-                          ┌─────────────┴─────────────┐
-                   WASM + SVG/DOM (live)       native GIF (feature-gated)
+                                WASM + SVG/DOM (live canvas)
+                                        │
+                            headless-browser frame capture ──▶ GIF
 ```
 
 ### Layering
 
 - **`sim` (core)** — owns all state; advances via a min-heap event queue keyed on integer virtual time. Pure logic, no layout/drawing. Deterministic.
 - **`scenario`** — builder API producing the initial `Engine` state.
-- **frame geometry** — Rust computes layout + interpolated drawables into a `Frame`; the web frontend (thin SVG/DOM via Dioxus RSX) — and a planned native GIF tool — just paint `Frame`s. Maximizes logic reuse, minimizes frontend code.
+- **frame geometry** — Rust computes layout + interpolated drawables into a `Frame`; the web frontend (thin SVG/DOM via Dioxus RSX) paints `Frame`s. The GIFs are captured *from* that same rendered canvas (see [GIF capture](#gif-capture)), so there is a single drawing path — no separate native renderer to keep in sync. Maximizes logic reuse, minimizes frontend code.
 
 ### Determinism & no-std-ish footprint
 
@@ -132,12 +133,23 @@ Both endpoints are torn down as their nodes are notified: the leader in `begin_w
 
 A round that never reaches its commit condition (a dropped `Write`/`WriteReply`) is abandoned after `WRITE_ROUND_TIMEOUT` (1500 ticks) on the leader's poll. Disruptive: thaw every frozen node and re-guard its torn-down grants, exactly as a commit would. Non-disruptive: dropping the stale round is the only cleanup needed, since no node state was touched.
 
+## GIF capture
+
+The blog-post GIFs are captured from the **real rendered web canvas**, not a separate renderer — so a GIF frame is pixel-identical to what a reader sees on the site, with zero drawing code to keep in sync. The pipeline (Python, `scripts/gifcap.py`):
+
+1. **Capture route.** The web app exposes `/capture/:name` (`web/src/scenarios.rs::Capture`, outside the nav `Shell` layout): a bare, frame-stepped `.pg-stage` with no title/run-bar/grant-bars. It pre-generates the *whole* run offline via `sim_view::generate_frames` — byte-for-byte the frames the live `use_sim_run` loop would record (same `FRAME_TICKS` stepping + `StopWhen` stop logic) — and shows one frame at a time. A `pg-capture` CSS class disables all transitions/animations, so a stepped frame is the exact settled state at its tick, not a mid-tween.
+2. **External stepping.** The route installs a `window.__setFrame(n)` hook (over Dioxus's eval JS↔Rust channel), publishes the run length as `window.__frameCount`, and mirrors the shown index into a `data-frame` attribute. The driver sets a frame, waits for `data-frame` to match, then screenshots the stage.
+3. **Encode.** [Playwright](https://playwright.dev) drives headless Chromium at desktop width (serving the built `dx` dist with an SPA `index.html` fallback for the deep-link route), and Pillow encodes the frames into a GIF that loops forever with a short static hold at both ends. Frames are subsampled to a ~20 ms GIF delay while preserving the site's wall-clock playback speed, and a single shared 256-color palette avoids inter-frame flicker.
+4. **Optimize.** Each GIF is finally shrunk in place with `gifsicle` (`-O3 --colors 64 --lossy=200`) — frame-diff optimization plus a palette+lossy pass that takes ~35% off the dense scenes with no visible quality loss at display size. `gifsicle` is an **external dependency** (install via e.g. `brew install gifsicle`); if it isn't on `PATH` the step is skipped with a warning and the un-optimized GIF is kept.
+
+Output filenames are prefixed `lease-101-` (namespacing them in the blog site's shared asset dir); captured at `--scale 2` (2× device pixels) for crisp text. The blog post itself (`scripts/bloggen.py`) concatenates the walkthrough sections and swaps each `:::figure` for its captured GIF — see [webpage.md](webpage.md#plain-blog-post).
+
 ## Packaging
 
 Single crate, `crate-type = ["cdylib", "rlib"]`:
 
 - The lean core is the default build; the `web/` crate depends on it by path and `dx` compiles it to WASM directly (no hand-written `wasm-bindgen` glue — the frontend calls `advance_to`/`frame_at` in-process).
-- Native GIF rendering is planned to be **feature-gated** behind a `native-render` feature (off by default), so the WASM build pulls in no heavy image/encoding deps. (Not yet added — see Status.)
+- GIF generation needs no extra Cargo features or native image/encoding deps: it reuses the WASM canvas via headless-browser capture (see [GIF capture](#gif-capture)), keeping the crate build lean. The capture + blog tooling lives in Python (`scripts/`, driven by `uv`).
 
 ## Status
 
@@ -152,7 +164,7 @@ Single crate, `crate-type = ["cdylib", "rlib"]`:
 - [x] Frame geometry + interpolation — `src/frame.rs`, `Engine::frame_at`
 - [x] Write path — disruptive (lease churn) + non-disruptive (no lease effect) — `src/engine.rs`
 - [x] WASM consumption — the `web/` crate uses the core by path and `dx` builds it to WASM (no separate `wasm-bindgen` layer needed)
-- [ ] Native GIF renderer (feature `native-render`)
+- [x] GIF capture — headless-browser screenshot of the `/capture/:name` route (`scripts/gifcap.py`), reusing the live canvas; no native renderer needed
 
 ### Module map
 

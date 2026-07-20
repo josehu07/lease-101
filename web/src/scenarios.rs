@@ -16,7 +16,9 @@ use dioxus::prelude::*;
 use lease_sim::event::{EventKind, LeaseStatus, MsgKind};
 use lease_sim::{Event, Scenario, Time, demos};
 
-use crate::sim_view::{GrantBars, RunBar, RunPhase, SimStage, StopWhen, Topology, use_sim_run};
+use crate::sim_view::{
+    GrantBars, RunBar, RunPhase, SimStage, StopWhen, Topology, generate_frames, use_sim_run,
+};
 
 /// Ticks the run keeps playing past its milestone event before halting, so the
 /// stopping frame can be read rather than snapping away the instant it lands.
@@ -400,6 +402,69 @@ pub fn ScenarioCanvas(name: String) -> Element {
                     rec_len,
                     grantees_only: true,
                     draggable: matches!(ph, RunPhase::Paused | RunPhase::Stopped),
+                }
+            }
+        }
+    }
+}
+
+/// Frame-stepped capture view for offline GIF generation (`/capture/:name`).
+///
+/// Renders *only* the scenario's `.pg-stage` (no title, run bar, or grant bars),
+/// inside the same page/box wrappers as the walkthrough figure, so at desktop
+/// width it is pixel-identical to what a reader sees on the site. Instead of the
+/// live playback loop it pre-generates the whole run ([`generate_frames`]) and
+/// shows one frame at a time, stepped *externally*: the page installs a
+/// `window.__setFrame(n)` hook (over the eval JS↔Rust channel) that a headless
+/// browser calls to select a frame, publishes the run length as
+/// `window.__frameCount`, and mirrors the shown index into a `data-frame`
+/// attribute the driver polls before screenshotting. The `pg-capture` class kills
+/// transitions/animations so each captured frame is the exact settled simulation
+/// state at that tick, not a mid-tween. See `scripts/gifcap.py`.
+#[component]
+pub fn Capture(name: String) -> Element {
+    let Some(spec) = lookup(&name) else {
+        return rsx! {
+            div { id: "capture-error", "unknown scenario: {name}" }
+        };
+    };
+    let scenario_fn = spec.scenario;
+    let stop = spec.stop;
+    let fit_pad = spec.fit_pad;
+    let topology = Topology::from_scenario(&(scenario_fn)());
+
+    // Pre-generate the full run once — byte-for-byte the frames the live canvas
+    // would record (same stepping + stop logic).
+    let frames = use_signal(|| generate_frames((scenario_fn)(), stop));
+    let count = frames.read().len();
+
+    // Externally-stepped frame index, driven by the headless browser through the
+    // eval channel: `window.__setFrame(n)` sends `n` to Rust, which sets the
+    // signal and re-renders. `window.__frameCount` lets the driver size the run,
+    // and `window.__captureReady` signals the hook is installed.
+    let mut idx = use_signal(|| 0usize);
+    use_future(move || async move {
+        let mut ev = document::eval(&format!(
+            "window.__frameCount = {count};\n\
+             window.__setFrame = (n) => dioxus.send(n);\n\
+             window.__captureReady = true;"
+        ));
+        while let Ok(n) = ev.recv::<usize>().await {
+            idx.set(n.min(count.saturating_sub(1)));
+        }
+    });
+
+    let frame = frames.read().get(idx()).cloned();
+    rsx! {
+        main { class: "page pg-capture",
+            div { class: "pg-root sc-root",
+                div { class: "pg-capture-stage", "data-frame": "{idx()}",
+                    SimStage {
+                        topology,
+                        frame,
+                        fit_height: true,
+                        fit_pad,
+                    }
                 }
             }
         }

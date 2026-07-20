@@ -1669,6 +1669,33 @@ body {
     line-height: 1.3;
 }
 
+/* ---- Offline GIF-capture view (`/capture/:name`) --------------------- */
+
+/* The capture page hosts a single frame-stepped `.pg-stage` (no run bar / grant
+   bars / title), laid out exactly as on the walkthrough — same `.page` width and
+   `.sc-root` box — so the screenshotted stage is pixel-identical to the site. The
+   surface behind the stage's rounded corners is the `.sc-root` panel color, just
+   as on the real page. */
+.pg-capture {
+    /* No bottom reading margin; the box is all there is. */
+    padding: 1rem 1.25rem;
+}
+
+/* Kill every transition/animation so a stepped frame is the exact settled state
+   at its tick — nodes/edges/bars snap to the frame instead of tweening, so the
+   headless driver never screenshots a mid-transition smear. */
+.pg-capture *,
+.pg-capture *::before,
+.pg-capture *::after {
+    transition: none !important;
+    animation: none !important;
+}
+
+/* Tight wrapper around the captured stage (the screenshot target). */
+.pg-capture-stage {
+    line-height: 0;
+}
+
 @media (max-width: 560px) {
     /* Stack the pro/con pair on narrow screens. */
     .tradeoff {

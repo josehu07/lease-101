@@ -23,6 +23,12 @@ pub enum Route {
         Home {},
         #[route("/sim")]
         Sim {},
+    #[end_layout]
+    // Offline GIF-capture view for one scenario: a bare, frame-stepped `.pg-stage`
+    // with no nav banner or page chrome. Not linked from the site; driven by the
+    // headless-browser capture tool (`scripts/gifcap.py`).
+    #[route("/capture/:name")]
+    Capture { name: String },
 }
 
 /// Shared layout: the sticky banner over whichever route is active.
@@ -120,6 +126,15 @@ fn Sim() -> Element {
             }
             Footer {}
         }
+    }
+}
+
+/// Capture: the offline GIF-capture route. Delegates to the frame-stepped
+/// `Capture` view; no page chrome (it sits outside the `Shell` layout).
+#[component]
+fn Capture(name: String) -> Element {
+    rsx! {
+        crate::scenarios::Capture { name }
     }
 }
 

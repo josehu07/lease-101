@@ -322,6 +322,43 @@ pub fn use_sim_run() -> SimRun {
     run
 }
 
+/// Generate the *entire* recorded frame sequence for a scenario up front, the
+/// offline counterpart to the live [`use_sim_run`] loop (which fills the same
+/// frames incrementally, one repaint-batch at a time). Produces byte-for-byte the
+/// same `Vec<Frame>` the live canvas would record — same `FRAME_TICKS` stepping,
+/// same `StopWhen` stop logic — so an offline consumer (the GIF capture route)
+/// replays exactly what a viewer sees in the browser. Kept in lockstep with the
+/// stop handling in `use_sim_run`.
+pub fn generate_frames(scenario: Scenario, stop: StopWhen) -> Vec<Frame> {
+    let mut eng = Engine::new(scenario);
+    let cap = stop.cap();
+    let mut frames = Vec::new();
+    let mut t: Time = 0;
+    let mut events_seen = 0usize;
+    let mut deadline: Option<Time> = None;
+    loop {
+        let events = eng.advance_to(t);
+        if let StopWhen::OnNthEvent { n, pred, after, .. } = stop
+            && deadline.is_none()
+        {
+            let hits = events.iter().filter(|ev| pred(ev)).count();
+            if hits > 0 {
+                events_seen += hits;
+                if events_seen >= n {
+                    deadline = Some((t + after).min(cap));
+                }
+            }
+        }
+        frames.push(eng.frame_at(t));
+        let d = deadline.unwrap_or(cap).min(cap);
+        if t >= d {
+            break;
+        }
+        t += FRAME_TICKS;
+    }
+    frames
+}
+
 /// The grantor → grantee shape of a scenario: everything the static canvas and
 /// the per-node bar layout derive from, independent of any running simulation.
 #[derive(Debug, Clone, PartialEq)]
@@ -1084,150 +1121,158 @@ pub fn SimStage(
         div {
             class: if fit_height { "pg-stage is-fit" } else { "pg-stage" },
             style: "{stage_style}",
-        if frame.is_some() {
-            svg {
-                class: "pg-edges",
-                view_box: "{view_box}",
-                preserve_aspect_ratio: "none",
-                defs {
-                    marker {
-                        id: "pg-arrow-active",
-                        view_box: "0 0 10 10",
-                        ref_x: "8",
-                        ref_y: "5",
-                        marker_units: "userSpaceOnUse",
-                        marker_width: "0.032",
-                        marker_height: "0.032",
-                        orient: "auto",
-                        path { class: "pg-arrow-head is-active", d: "M0,0 L10,5 L0,10 z" }
-                    }
-                    marker {
-                        id: "pg-arrow-guarding",
-                        view_box: "0 0 10 10",
-                        ref_x: "8",
-                        ref_y: "5",
-                        marker_units: "userSpaceOnUse",
-                        marker_width: "0.032",
-                        marker_height: "0.032",
-                        orient: "auto",
-                        path { class: "pg-arrow-head is-guarding", d: "M0,0 L10,5 L0,10 z" }
-                    }
-                    marker {
-                        id: "pg-arrow-idle",
-                        view_box: "0 0 10 10",
-                        ref_x: "8",
-                        ref_y: "5",
-                        marker_units: "userSpaceOnUse",
-                        marker_width: "0.032",
-                        marker_height: "0.032",
-                        orient: "auto",
-                        path { class: "pg-arrow-head is-idle", d: "M0,0 L10,5 L0,10 z" }
-                    }
-                    marker {
-                        id: "pg-arrow",
-                        view_box: "0 0 10 10",
-                        ref_x: "8",
-                        ref_y: "5",
-                        marker_units: "userSpaceOnUse",
-                        marker_width: "0.032",
-                        marker_height: "0.032",
-                        orient: "auto",
-                        path { class: "pg-arrow-head", d: "M0,0 L10,5 L0,10 z" }
-                    }
-                }
-                for (i , e) in edges.iter().enumerate() {
-                    {
-                        let st = stem(*e);
-                        rsx! {
-                            line {
-                                key: "b{i}",
-                                class: "pg-edge",
-                                x1: "{st.x1}",
-                                y1: "{st.y1}",
-                                x2: "{st.x2}",
-                                y2: "{st.y2}",
+            if frame.is_some() {
+                svg {
+                    class: "pg-edges",
+                    view_box: "{view_box}",
+                    preserve_aspect_ratio: "none",
+                    defs {
+                        marker {
+                            id: "pg-arrow-active",
+                            view_box: "0 0 10 10",
+                            ref_x: "8",
+                            ref_y: "5",
+                            marker_units: "userSpaceOnUse",
+                            marker_width: "0.032",
+                            marker_height: "0.032",
+                            orient: "auto",
+                            path {
+                                class: "pg-arrow-head is-active",
+                                d: "M0,0 L10,5 L0,10 z",
+                            }
+                        }
+                        marker {
+                            id: "pg-arrow-guarding",
+                            view_box: "0 0 10 10",
+                            ref_x: "8",
+                            ref_y: "5",
+                            marker_units: "userSpaceOnUse",
+                            marker_width: "0.032",
+                            marker_height: "0.032",
+                            orient: "auto",
+                            path {
+                                class: "pg-arrow-head is-guarding",
+                                d: "M0,0 L10,5 L0,10 z",
+                            }
+                        }
+                        marker {
+                            id: "pg-arrow-idle",
+                            view_box: "0 0 10 10",
+                            ref_x: "8",
+                            ref_y: "5",
+                            marker_units: "userSpaceOnUse",
+                            marker_width: "0.032",
+                            marker_height: "0.032",
+                            orient: "auto",
+                            path {
+                                class: "pg-arrow-head is-idle",
+                                d: "M0,0 L10,5 L0,10 z",
+                            }
+                        }
+                        marker {
+                            id: "pg-arrow",
+                            view_box: "0 0 10 10",
+                            ref_x: "8",
+                            ref_y: "5",
+                            marker_units: "userSpaceOnUse",
+                            marker_width: "0.032",
+                            marker_height: "0.032",
+                            orient: "auto",
+                            path {
+                                class: "pg-arrow-head",
+                                d: "M0,0 L10,5 L0,10 z",
                             }
                         }
                     }
-                }
-                for (i , e) in edges.iter().enumerate() {
-                    line {
-                        key: "bh{i}",
-                        class: "pg-edge-head",
-                        x1: "{e.x1}",
-                        y1: "{e.y1}",
-                        x2: "{e.x2}",
-                        y2: "{e.y2}",
-                        "marker-end": "url(#pg-arrow)",
-                    }
-                }
-                for (i , le) in lease_edges.iter().enumerate() {
-                    {
-                        let st = stem(le.e);
-                        rsx! {
-                            line {
-                                key: "s{i}",
-                                class: match le.status {
-                                    LeaseStatus::Active => "pg-ledge is-active",
-                                    LeaseStatus::Guarding => "pg-ledge is-guarding",
-                                    _ => "pg-ledge is-idle",
-                                },
-                                x1: "{st.x1}",
-                                y1: "{st.y1}",
-                                x2: "{st.x2}",
-                                y2: "{st.y2}",
-                                opacity: ledge_opacity(le.status, le.fill),
+                    for (i , e) in edges.iter().enumerate() {
+                        {
+                            let st = stem(*e);
+                            rsx! {
+                                line {
+                                    key: "b{i}",
+                                    class: "pg-edge",
+                                    x1: "{st.x1}",
+                                    y1: "{st.y1}",
+                                    x2: "{st.x2}",
+                                    y2: "{st.y2}",
+                                }
                             }
                         }
                     }
-                }
-                for (i , le) in lease_edges.iter().enumerate() {
-                    line {
-                        key: "h{i}",
-                        class: "pg-ledge-head",
-                        x1: "{le.e.x1}",
-                        y1: "{le.e.y1}",
-                        x2: "{le.e.x2}",
-                        y2: "{le.e.y2}",
-                        opacity: ledge_opacity(le.status, le.fill),
-                        "marker-end": ledge_marker(le.status),
+                    for (i , e) in edges.iter().enumerate() {
+                        line {
+                            key: "bh{i}",
+                            class: "pg-edge-head",
+                            x1: "{e.x1}",
+                            y1: "{e.y1}",
+                            x2: "{e.x2}",
+                            y2: "{e.y2}",
+                            "marker-end": "url(#pg-arrow)",
+                        }
                     }
-                }
-            }
-            if let Some(f) = frame.as_ref() {
-                for (i , m) in f.messages.iter().enumerate() {
-                    {
-                        let opacity = match m.fate {
-                            MsgFate::Dropped => drop_glyph_opacity(m.progress),
-                            MsgFate::Delivered => msg_opacity(m.progress),
-                        };
-                        let p = lerp(pts[m.from], pts[m.to], m.progress);
-                        rsx! {
-                            div {
-                                key: "m{i}",
-                                class: msg_class(m.kind),
-                                style: format!(
-                                    "left: {:.3}%; top: {:.3}%; opacity: {:.3};",
-                                    p.x * 100.0,
-                                    ny(p.y),
-                                    opacity,
-                                ),
-                                MsgGlyph { kind: m.kind }
+                    for (i , le) in lease_edges.iter().enumerate() {
+                        {
+                            let st = stem(le.e);
+                            rsx! {
+                                line {
+                                    key: "s{i}",
+                                    class: match le.status {
+                                        LeaseStatus::Active => "pg-ledge is-active",
+                                        LeaseStatus::Guarding => "pg-ledge is-guarding",
+                                        _ => "pg-ledge is-idle",
+                                    },
+                                    x1: "{st.x1}",
+                                    y1: "{st.y1}",
+                                    x2: "{st.x2}",
+                                    y2: "{st.y2}",
+                                    opacity: ledge_opacity(le.status, le.fill),
+                                }
                             }
                         }
                     }
-                    if m.fate == MsgFate::Dropped {
-                        if let Some(bp) = drop_burst(m.progress) {
-                            {
-                                let p = lerp(pts[m.from], pts[m.to], DROP_AT);
-                                rsx! {
-                                    div {
-                                        key: "d{i}",
-                                        class: "pg-drop",
-                                        style: format!("left: {:.3}%; top: {:.3}%; --bp: {:.3};", p.x * 100.0, ny(p.y), bp),
-                                        span { class: "pg-drop-ring" }
-                                        svg { class: "pg-drop-x", view_box: "0 0 24 24",
-                                            path { d: "M6 6 L18 18 M18 6 L6 18" }
+                    for (i , le) in lease_edges.iter().enumerate() {
+                        line {
+                            key: "h{i}",
+                            class: "pg-ledge-head",
+                            x1: "{le.e.x1}",
+                            y1: "{le.e.y1}",
+                            x2: "{le.e.x2}",
+                            y2: "{le.e.y2}",
+                            opacity: ledge_opacity(le.status, le.fill),
+                            "marker-end": ledge_marker(le.status),
+                        }
+                    }
+                }
+                if let Some(f) = frame.as_ref() {
+                    for (i , m) in f.messages.iter().enumerate() {
+                        {
+                            let opacity = match m.fate {
+                                MsgFate::Dropped => drop_glyph_opacity(m.progress),
+                                MsgFate::Delivered => msg_opacity(m.progress),
+                            };
+                            let p = lerp(pts[m.from], pts[m.to], m.progress);
+                            rsx! {
+                                div {
+                                    key: "m{i}",
+                                    class: msg_class(m.kind),
+                                    style: format!("left: {:.3}%; top: {:.3}%; opacity: {:.3};", p.x * 100.0, ny(p.y), opacity),
+                                    MsgGlyph { kind: m.kind }
+                                }
+                            }
+                        }
+                        if m.fate == MsgFate::Dropped {
+                            if let Some(bp) = drop_burst(m.progress) {
+                                {
+                                    let p = lerp(pts[m.from], pts[m.to], DROP_AT);
+                                    rsx! {
+                                        div {
+                                            key: "d{i}",
+                                            class: "pg-drop",
+                                            style: format!("left: {:.3}%; top: {:.3}%; --bp: {:.3};", p.x * 100.0, ny(p.y), bp),
+                                            span { class: "pg-drop-ring" }
+                                            svg { class: "pg-drop-x", view_box: "0 0 24 24",
+                                                path { d: "M6 6 L18 18 M18 6 L6 18" }
+                                            }
                                         }
                                     }
                                 }
@@ -1235,90 +1280,88 @@ pub fn SimStage(
                         }
                     }
                 }
-            }
-            for id in 0..n {
-                div {
-                    key: "{id}",
-                    class: {
-                        let mut c = String::from("pg-node");
-                        if grantors.contains(&id) {
-                            c.push_str(" is-grantor");
+                for id in 0..n {
+                    div {
+                        key: "{id}",
+                        class: {
+                            let mut c = String::from("pg-node");
+                            if grantors.contains(&id) {
+                                c.push_str(" is-grantor");
+                            }
+                            if grantees.contains(&id) {
+                                c.push_str(" is-grantee");
+                            }
+                            if held[id] >= maj {
+                                c.push_str(" is-majority");
+                            }
+                            c
+                        },
+                        style: format!(
+                            "left: {:.3}%; top: {:.3}%; {}",
+                            pts[id].x * 100.0,
+                            ny(pts[id].y),
+                            aura_style(aura[id]),
+                        ),
+                        if leader == Some(id) {
+                            Crown {}
                         }
-                        if grantees.contains(&id) {
-                            c.push_str(" is-grantee");
-                        }
-                        if held[id] >= maj {
-                            c.push_str(" is-majority");
-                        }
-                        c
-                    },
-                    style: format!(
-                        "left: {:.3}%; top: {:.3}%; {}",
-                        pts[id].x * 100.0,
-                        ny(pts[id].y),
-                        aura_style(aura[id]),
-                    ),
-                    if leader == Some(id) {
-                        Crown {}
-                    }
-                    span { class: "pg-node-id", "{id}" }
-                    if !timers[id].is_empty() {
-                        div {
-                            class: "pg-node-timers",
-                            style: {
-                                let (dx, dy) = (base_pts[id].x - 0.5, base_pts[id].y - 0.5);
-                                let len = (dx * dx + dy * dy).sqrt().max(1e-6);
-                                let (ux, uy) = (dx / len, dy / len);
-                                let (out, inc) = bar_counts[id];
-                                let off = timer_offset_rem(out, inc, ux, uy);
-                                format!("--tx: {:.3}rem; --ty: {:.3}rem;", ux * off, uy * off)
-                            },
-                            for (role , cls , arrow , head) in [
-                                (TimerRole::Grantor, "pg-timer-col is-out", "\u{2192}", "OUT"),
-                                (TimerRole::Grantee, "pg-timer-col is-in", "\u{2190}", "IN"),
-                            ] {
-                                if timers[id].iter().any(|t| t.role == role) {
-                                    div { key: "{head}", class: cls,
-                                        span { class: "pg-timer-colhead", "{head}" }
-                                        for (j , tb) in timers[id].iter().filter(|t| t.role == role).enumerate() {
-                                            div {
-                                                key: "{j}",
-                                                class: "pg-timer-cell",
-                                                "data-hint": format!(
-                                                    "as {} node {} · {}",
-                                                    match role {
-                                                        TimerRole::Grantor => "grantor to",
-                                                        TimerRole::Grantee => "grantee of",
-                                                    },
-                                                    tb.other,
-                                                    match tb.status {
-                                                        LeaseStatus::Active => "active",
-                                                        LeaseStatus::Guarding => "guarding",
-                                                        LeaseStatus::Expired => "expired",
-                                                        LeaseStatus::Inactive => "idle",
-                                                    },
-                                                ),
-                                                span { class: "pg-timer-label", "{arrow}" "{tb.other}" }
-                                                div { class: "pg-timer",
-                                                    // Active drains in the role color; Guarding drains in
-                                                    // blue (its guard-window countdown); idle/expired have
-                                                    // no live countdown, shown as a solid gray track.
-                                                    match tb.status {
-                                                        LeaseStatus::Active => rsx! {
-                                                            div {
-                                                                class: "pg-timer-fill",
-                                                                style: "width: {tb.fill * 100.0}%;",
-                                                            }
+                        span { class: "pg-node-id", "{id}" }
+                        if !timers[id].is_empty() {
+                            div {
+                                class: "pg-node-timers",
+                                style: {
+                                    let (dx, dy) = (base_pts[id].x - 0.5, base_pts[id].y - 0.5);
+                                    let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                                    let (ux, uy) = (dx / len, dy / len);
+                                    let (out, inc) = bar_counts[id];
+                                    let off = timer_offset_rem(out, inc, ux, uy);
+                                    format!("--tx: {:.3}rem; --ty: {:.3}rem;", ux * off, uy * off)
+                                },
+                                for (role , cls , arrow , head) in [
+                                    (TimerRole::Grantor, "pg-timer-col is-out", "\u{2192}", "OUT"),
+                                    (TimerRole::Grantee, "pg-timer-col is-in", "\u{2190}", "IN"),
+                                ]
+                                {
+                                    if timers[id].iter().any(|t| t.role == role) {
+                                        div { key: "{head}", class: cls,
+                                            span { class: "pg-timer-colhead", "{head}" }
+                                            for (j , tb) in timers[id].iter().filter(|t| t.role == role).enumerate() {
+                                                div {
+                                                    key: "{j}",
+                                                    class: "pg-timer-cell",
+                                                    "data-hint": format!(
+                                                        "as {} node {} · {}",
+                                                        match role {
+                                                            TimerRole::Grantor => "grantor to",
+                                                            TimerRole::Grantee => "grantee of",
                                                         },
-                                                        LeaseStatus::Guarding => rsx! {
-                                                            div {
-                                                                class: "pg-timer-fill is-guarding",
-                                                                style: "width: {tb.fill * 100.0}%;",
-                                                            }
+                                                        tb.other,
+                                                        match tb.status {
+                                                            LeaseStatus::Active => "active",
+                                                            LeaseStatus::Guarding => "guarding",
+                                                            LeaseStatus::Expired => "expired",
+                                                            LeaseStatus::Inactive => "idle",
                                                         },
-                                                        _ => rsx! {
-                                                            div { class: "pg-timer-fill is-inactive" }
-                                                        },
+                                                    ),
+                                                    span { class: "pg-timer-label",
+                                                        "{arrow}"
+                                                        "{tb.other}"
+                                                    }
+                                                    div { class: "pg-timer",
+                                                        // Active drains in the role color; Guarding drains in
+                                                        // blue (its guard-window countdown); idle/expired have
+                                                        // no live countdown, shown as a solid gray track.
+                                                        match tb.status {
+                                                            LeaseStatus::Active => rsx! {
+                                                                div { class: "pg-timer-fill", style: "width: {tb.fill * 100.0}%;" }
+                                                            },
+                                                            LeaseStatus::Guarding => rsx! {
+                                                                div { class: "pg-timer-fill is-guarding", style: "width: {tb.fill * 100.0}%;" }
+                                                            },
+                                                            _ => rsx! {
+                                                                div { class: "pg-timer-fill is-inactive" }
+                                                            },
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1329,64 +1372,66 @@ pub fn SimStage(
                         }
                     }
                 }
-            }
-        } else {
-            svg {
-                class: "pg-edges",
-                view_box: "{view_box}",
-                preserve_aspect_ratio: "none",
-                defs {
-                    marker {
-                        id: "pg-arrow",
-                        view_box: "0 0 10 10",
-                        ref_x: "8",
-                        ref_y: "5",
-                        marker_units: "userSpaceOnUse",
-                        marker_width: "0.032",
-                        marker_height: "0.032",
-                        orient: "auto",
-                        path { class: "pg-arrow-head", d: "M0,0 L10,5 L0,10 z" }
-                    }
-                }
-                for (i , e) in edges.iter().enumerate() {
-                    {
-                        let st = stem(*e);
-                        rsx! {
-                            line {
-                                key: "s{i}",
-                                class: "pg-edge",
-                                x1: "{st.x1}",
-                                y1: "{st.y1}",
-                                x2: "{st.x2}",
-                                y2: "{st.y2}",
+            } else {
+                svg {
+                    class: "pg-edges",
+                    view_box: "{view_box}",
+                    preserve_aspect_ratio: "none",
+                    defs {
+                        marker {
+                            id: "pg-arrow",
+                            view_box: "0 0 10 10",
+                            ref_x: "8",
+                            ref_y: "5",
+                            marker_units: "userSpaceOnUse",
+                            marker_width: "0.032",
+                            marker_height: "0.032",
+                            orient: "auto",
+                            path {
+                                class: "pg-arrow-head",
+                                d: "M0,0 L10,5 L0,10 z",
                             }
                         }
                     }
+                    for (i , e) in edges.iter().enumerate() {
+                        {
+                            let st = stem(*e);
+                            rsx! {
+                                line {
+                                    key: "s{i}",
+                                    class: "pg-edge",
+                                    x1: "{st.x1}",
+                                    y1: "{st.y1}",
+                                    x2: "{st.x2}",
+                                    y2: "{st.y2}",
+                                }
+                            }
+                        }
+                    }
+                    for (i , e) in edges.iter().enumerate() {
+                        line {
+                            key: "h{i}",
+                            class: "pg-edge-head",
+                            x1: "{e.x1}",
+                            y1: "{e.y1}",
+                            x2: "{e.x2}",
+                            y2: "{e.y2}",
+                            "marker-end": "url(#pg-arrow)",
+                        }
+                    }
                 }
-                for (i , e) in edges.iter().enumerate() {
-                    line {
-                        key: "h{i}",
-                        class: "pg-edge-head",
-                        x1: "{e.x1}",
-                        y1: "{e.y1}",
-                        x2: "{e.x2}",
-                        y2: "{e.y2}",
-                        "marker-end": "url(#pg-arrow)",
+                for id in 0..n {
+                    div {
+                        key: "{id}",
+                        class: if grantors.contains(&id) && grantees.contains(&id) { "pg-node is-grantor is-grantee" } else if grantors.contains(&id) { "pg-node is-grantor" } else if grantees.contains(&id) { "pg-node is-grantee" } else { "pg-node" },
+                        style: format!("left: {:.3}%; top: {:.3}%;", pts[id].x * 100.0, ny(pts[id].y)),
+                        if leader == Some(id) {
+                            Crown {}
+                        }
+                        span { class: "pg-node-id", "{id}" }
                     }
                 }
             }
-            for id in 0..n {
-                div {
-                    key: "{id}",
-                    class: if grantors.contains(&id) && grantees.contains(&id) { "pg-node is-grantor is-grantee" } else if grantors.contains(&id) { "pg-node is-grantor" } else if grantees.contains(&id) { "pg-node is-grantee" } else { "pg-node" },
-                    style: format!("left: {:.3}%; top: {:.3}%;", pts[id].x * 100.0, ny(pts[id].y)),
-                    if leader == Some(id) {
-                        Crown {}
-                    }
-                    span { class: "pg-node-id", "{id}" }
-                }
-            }
-        }
         }
     }
 }
@@ -1437,7 +1482,11 @@ pub fn RunBar(
         div { class: "pg-runbar",
             div { class: "pg-runctrl",
                 if generating {
-                    button { class: "pg-btn is-stop", onclick: move |_| on_pause.call(()), "Pause" }
+                    button {
+                        class: "pg-btn is-stop",
+                        onclick: move |_| on_pause.call(()),
+                        "Pause"
+                    }
                 } else if paused {
                     button { class: "pg-btn", onclick: move |_| on_resume.call(()), "Resume" }
                 } else {

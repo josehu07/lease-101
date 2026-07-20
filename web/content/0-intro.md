@@ -13,6 +13,6 @@ Let's walk through how leases work, and how to apply leases to optimize wide-are
 3. [Leader Leases](#leader-leases) -- everyone leases the leader, producing a stable leader who can read locally.
 4. [Quorum Leases](#quorum-leases) -- everyone leases a subset of nodes for local read in the absence of writes.
 5. [Roster Leases](#roster-leases) -- everyone exchanges leases on the roster: a free side-channel agreement.
-6. [Bodega Protocol](#bodega) -- co-designs roster leases with consensus: local read anywhere, anytime.
+6. [Bodega protocol](#bodega) -- co-designs roster leases with consensus: local read anywhere, anytime.
 
 Prefer hands-on exploration? Try our [distributed lease simulator playground](/sim).
