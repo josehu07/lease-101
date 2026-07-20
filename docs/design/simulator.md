@@ -1,6 +1,6 @@
 # Lease Message Simulator
 
-The `lease_sim` Rust crate: a multi-node, message-passing lease simulator. It powers real-time WASM animations on the web (the engine runs live in-browser, not pre-rendered) and pre-generated GIFs for the blog post. See the algorithms it models in [algorithm.md](algorithm.md).
+The `lease_sim` Rust crate: a multi-node, message-passing lease simulator. It powers real-time WASM animations on the web (the engine runs live in-browser, not pre-rendered) and, planned, pre-generated GIFs for the blog post. See the algorithms it models in [algorithm.md](algorithm.md).
 
 ## Goals
 
@@ -8,7 +8,7 @@ The `lease_sim` Rust crate: a multi-node, message-passing lease simulator. It po
 - Everything configurable: per-node behavior (response slowness, tendency to initiate, failure likelihood, clock offset/drift) and per-link behavior (delay shape, drop probability, partitions).
 - Continually simulate message passing, tracking state of all nodes, links, messages, and logical lease status.
 - Output a stream of timestamped **events**, and turn them into lightweight browser animations.
-- **Drivable deterministically**: scripted or interactive [commands](#driving-commands) (initiate / revoke / fail / recover) let a caller cause specific events, not just watch stochastic ones.
+- **Drivable deterministically**: scripted or interactive [commands](#driving-commands) (initiate / revoke / fail / recover / write) let a caller cause specific events, not just watch stochastic ones.
 
 ## Scope: one primitive, many patterns
 
@@ -33,14 +33,14 @@ scenario  ──build──▶  Engine (DES, event heap)  ──▶  Event strea
                             └──▶ Frame geometry (interpolated)
                                         │
                           ┌─────────────┴─────────────┐
-                     WASM + Canvas2D (live)      native GIF (feature-gated)
+                   WASM + SVG/DOM (live)       native GIF (feature-gated)
 ```
 
 ### Layering
 
 - **`sim` (core)** — owns all state; advances via a min-heap event queue keyed on integer virtual time. Pure logic, no layout/drawing. Deterministic.
 - **`scenario`** — builder API producing the initial `Engine` state.
-- **frame geometry** — Rust computes layout + interpolated drawables into a `Frame`; the frontend (thin Canvas2D) and the native GIF tool both just paint `Frame`s. Maximizes logic reuse, minimizes frontend code.
+- **frame geometry** — Rust computes layout + interpolated drawables into a `Frame`; the web frontend (thin SVG/DOM via Dioxus RSX) — and a planned native GIF tool — just paint `Frame`s. Maximizes logic reuse, minimizes frontend code.
 
 ### Determinism & no-std-ish footprint
 
@@ -67,8 +67,9 @@ The event stream is guaranteed sorted by time: message *sends* emit immediately,
 Beyond stochastic behavior, a caller can inject deterministic actions via a `Command`:
 
 - `Initiate(LeaseId)` — an idle grantor opens (guards) the lease.
-- `Revoke(LeaseId)` — a grantor proactively revokes; it stops renewing and notifies the grantee, while letting its own `D'` lapse naturally (safe whether or not the grantee is reached).
+- `Revoke(LeaseId)` — a grantor proactively revokes; it stops renewing and notifies the grantee (safe whether or not the grantee is reached — the grantor's `D'` still bounds it). The grantee drops its hold and returns a `RevokeReply`; **on that ack the grantor leaves the granting state at once** rather than waiting for `D'` to lapse. This stays safe: the ack is a round-trip *after* the grantee expired, so the grantee's expiry already precedes the grantor's, preserving `grantor expiry ≥ grantee expiry`. (Without the ack the grantor simply lets `D'` lapse; the ack just ends it promptly.)
 - `FailNode(NodeId)` / `RecoverNode(NodeId)` — crash or restore a node.
+- `Write` — the leader serves one write round now (the scripted one-shot form of a `WriteTick`; disruptive or not per `write_disruptive`). Lets a scenario inject a single write at a chosen tick without arming a periodic cadence (`writes(None, true)`).
 
 Two ways in, both reproducible per seed:
 
@@ -82,7 +83,7 @@ Reply latency is modeled by scheduling the reply-send after the responder's thin
 - **Distributions** via a small `Dist` enum: `Fixed`, `Uniform`, `Normal`.
 - **Per-node:** clock offset, clock drift, response delay (`Dist`), tendency to initiate a first step, failure hazard, recovery hazard. `all_nodes(f)` applies one closure to every node for symmetric patterns.
 - **Per-link:** delay distribution (`Dist`), drop probability, partition toggle. Unlisted links fall back to a sensible default, so pattern helpers need only declare *leases*.
-- **Per-message-kind:** an extra drop probability per `MsgKind`, set with `kind_drop(kind, p)` and layered on top of the per-link `drop_chance` (combined as one independent probability `1 − (1−link)(1−kind)`). Lets a caller fail a whole *class* of messages — e.g. every `Guard` or every `Renew` — without touching link reliability.
+- **Per-message-kind:** an extra drop probability per `MsgKind`, set with `kind_drop(kind, p)` and layered on top of the per-link `drop_chance` (combined as one independent probability `1 − (1−link)(1−kind)`). Lets a caller fail a whole *class* of messages — e.g. every `Guard` or every `Renew` — without touching link reliability. `kind_drop_from(kind, p, from)` is the time-gated variant: the drop only applies from global tick `from` onward, so a scenario can establish cleanly and *then* start losing a kind (e.g. drop `RenewReply`s only after the lease is active).
 - **Relationships:** intended grantor → grantee lease pairs, declared individually (`lease`) or via a pattern helper (`all_to_one`, `all_to_many`, `all_to_all`).
 - **Writes:** `writes(interval, disruptive)` sets the leader's write cadence (`Some(avg_ticks)` with ±20% jitter, or `None` to disable) and whether writes are disruptive (see [Write path](#write-path)).
 - **Commands:** scripted `(time, Command)` pairs (see [Driving commands](#driving-commands)).
@@ -109,19 +110,19 @@ Reply latency is modeled by scheduling the reply-send after the responder's thin
 - `NodeFailed { node }` / `NodeRecovered { node }`.
 - `WriteStarted { leader }` / `WriteCommitted { leader }` — a write round (either mode) began / committed at the leader (see [Write path](#write-path)).
 
-Message kinds mirror the algorithm — `Guard`, `GuardReply`, `Renew`, `RenewReply`, `Revoke` — plus the write path: `Write`, `WriteReply`, `Commit`.
+Message kinds mirror the algorithm — `Guard`, `GuardReply`, `Renew`, `RenewReply`, `Revoke`, `RevokeReply` (the grantee's acknowledgement that it dropped a revoked lease; on receipt the grantor safely leaves the granting state — see [Driving commands](#driving-commands)) — plus the write path: `Write`, `WriteReply`, `Commit`.
 
 ## Write path
 
-A stylized write path, enabled by `writes(interval, disruptive)`, illustrates how writes interact with leases. The **leader** is the smallest-id grantee (matching the playground's crowned node). A `WriteTick` fires every `interval` ± 20% jitter; the leader opens a round and broadcasts `Write` to every peer. Each write carries a stable **id** (rides the message's `lease_idx` slot, unused for write messages), so overlapping rounds stay distinct. Both modes share the commit rule: the leader commits round `id` once its reply set (itself counted implicitly) both reaches a `majority = ⌊n/2⌋+1` **and** covers every grantee node, then emits `WriteCommitted` and broadcasts `Commit`.
+A stylized write path, enabled by `writes(interval, disruptive)`, illustrates how writes interact with leases. The **leader** is the smallest-id grantee (matching the playground's crowned node). A `WriteTick` fires every `interval` ± 20% jitter (or a scripted `Command::Write` fires one write on demand, for scenarios that want a single write with no periodic cadence); the leader opens a round and broadcasts `Write` to every peer. Each write carries a stable **id** (rides the message's `lease_idx` slot, unused for write messages), so overlapping rounds stay distinct. Both modes share the commit rule: the leader commits round `id` once its reply set (itself counted implicitly) both reaches a `majority = ⌊n/2⌋+1` **and** covers every grantee node, then emits `WriteCommitted` and broadcasts `Commit`.
 
-**Disruptive** — a write suspends the *read* leases each node holds (models quorum-lease write coupling, where the write is itself the revocation notice). One round at a time (a new tick is skipped while a round is outstanding):
+**Disruptive** — a write **tears down** the leases it touches (models quorum-lease write coupling, where the write is itself the revocation notice), so they must be **re-established from scratch, re-guarding**, once the write commits — the "Lease teardown" cost in [algorithm.md](algorithm.md#write-disrupts-local-reads). One round at a time (a new tick is skipped while a round is outstanding):
 
-1. **Suspend + broadcast.** The leader drops the read leases it holds *as a grantee* (active/guarding → expired), *freezes* itself so incoming renews can't re-activate them, emits `WriteStarted`, and broadcasts `Write`.
-2. **Peer suspend + reply.** Each peer receiving `Write` does the same — drops the reads it holds as a grantee, freezes, and replies `WriteReply` after its think time. No `Revoke` is sent: the `Write` *is* the notification.
-3. **Commit + resume.** On commit the leader unfreezes; each node receiving `Commit` unfreezes. Grantors never stopped renewing, so the next renew re-activates each suspended hold — no re-guarding. Freezing (ignoring renews) between suspend and `Commit` is what makes recovery genuinely commit-driven rather than an immediate re-activation.
+1. **Suspend + broadcast.** The leader tears down every lease it takes part in — the reads it holds *as a grantee* (active/guarding → expired) and the grants it makes *as a grantor* (→ inactive, stops renewing) — *freezes* itself (so it won't re-guard or re-activate mid-write), emits `WriteStarted`, and broadcasts `Write`.
+2. **Peer suspend + reply.** Each peer receiving `Write` does the same — tears down both sides of its leases, freezes, and replies `WriteReply` after its think time. No `Revoke` is sent: the `Write` *is* the notification.
+3. **Commit + re-establish.** On commit the leader thaws and re-establishes locally; each node receiving `Commit` does the same (`thaw_and_reguard`). Recovery is **deterministic and commit-driven**: the moment a grantor learns the write committed, it re-opens a fresh **guard** for each grant the write tore down (tracked by a per-lease `reguard_on_thaw` flag set during teardown) — no waiting on a stochastic re-initiation. Each lease then re-establishes through the full guard → renew handshake, paying the guard round-trips again. (A stuck round that hits `WRITE_ROUND_TIMEOUT` thaws and re-guards the same way, so an aborted write still recovers.)
 
-Note the grants a node *makes* are never touched by a write — only the reads it *holds*. In an all-to-one topology the leader is the sole grantee, so a write suspends exactly its held majority; grantors keep renewing into the frozen leader, and its reads snap back the moment the `Commit` thaws it.
+Both endpoints are torn down as their nodes are notified: the leader in `begin_write`, every peer in `on_write` — so a lease's grantor and grantee each reset when they learn of the write. In an all-to-one topology the leader is the sole grantee; a write suspends its held majority and resets every grantor's grant to it, and the majority visibly rebuilds via a fresh guard round after the `Commit`.
 
 **Non-disruptive** — leases are left entirely untouched (models Bodega's background leases, where writes don't interrupt reads). Rounds may overlap freely:
 
@@ -129,14 +130,14 @@ Note the grants a node *makes* are never touched by a write — only the reads i
 2. **Peer reply.** Each peer keeps its leases/renews running and simply replies `WriteReply`.
 3. **Commit.** On commit the leader emits `WriteCommitted` and broadcasts `Commit`, which every node ignores for lease purposes. The `Write`/`WriteReply`/`Commit` messages sweep and animate, but no lease or node state ever changes.
 
-A round that never reaches its commit condition (a dropped `Write`/`WriteReply`) is abandoned after `WRITE_ROUND_TIMEOUT` (1500 ticks) on the leader's poll. Disruptive: thaw every frozen node so its reads re-activate. Non-disruptive: dropping the stale round is the only cleanup needed, since no node state was touched.
+A round that never reaches its commit condition (a dropped `Write`/`WriteReply`) is abandoned after `WRITE_ROUND_TIMEOUT` (1500 ticks) on the leader's poll. Disruptive: thaw every frozen node and re-guard its torn-down grants, exactly as a commit would. Non-disruptive: dropping the stale round is the only cleanup needed, since no node state was touched.
 
 ## Packaging
 
 Single crate, `crate-type = ["cdylib", "rlib"]`:
 
-- Core + WASM bindings are the default build (lean).
-- Native GIF rendering is **feature-gated** behind `native-render` (off by default), so the WASM build pulls in no heavy image/encoding deps.
+- The lean core is the default build; the `web/` crate depends on it by path and `dx` compiles it to WASM directly (no hand-written `wasm-bindgen` glue — the frontend calls `advance_to`/`frame_at` in-process).
+- Native GIF rendering is planned to be **feature-gated** behind a `native-render` feature (off by default), so the WASM build pulls in no heavy image/encoding deps. (Not yet added — see Status.)
 
 ## Status
 
@@ -146,11 +147,11 @@ Single crate, `crate-type = ["cdylib", "rlib"]`:
 - [x] Scenario builder API — `src/scenario.rs`
 - [x] Lease state machine (one-to-one, per [algorithm.md](algorithm.md)) — `src/engine.rs`
 - [x] Event stream (time-ordered) — `src/event.rs`
-- [x] Deterministic driving commands (initiate/revoke/fail/recover), scripted + live — `src/engine.rs`
+- [x] Deterministic driving commands (initiate/revoke/fail/recover/write), scripted + live — `src/engine.rs`
 - [x] Pattern helpers (`all_to_one`/`all_to_many`/`all_to_all`) — `src/scenario.rs`
 - [x] Frame geometry + interpolation — `src/frame.rs`, `Engine::frame_at`
 - [x] Write path — disruptive (lease churn) + non-disruptive (no lease effect) — `src/engine.rs`
-- [ ] WASM bindings (`wasm-bindgen`)
+- [x] WASM consumption — the `web/` crate uses the core by path and `dx` builds it to WASM (no separate `wasm-bindgen` layer needed)
 - [ ] Native GIF renderer (feature `native-render`)
 
 ### Module map
@@ -164,6 +165,7 @@ Single crate, `crate-type = ["cdylib", "rlib"]`:
 | `scenario` | `Scenario` builder, `NodeConfig`, `LinkConfig`, `LeaseParams`, pattern helpers |
 | `engine` | DES `Engine`: `advance_to` (event stream) + `frame_at` (geometry) + `command` |
 | `frame` | `Frame` geometry: `NodeShape`, `MsgShape`, `LeaseBar` (per-party status), ring layout, lerp |
+| `demos` | Fixed-seed demo `Scenario`s for the walkthrough figures (e.g. `one_to_one_success`), natively unit-tested |
 
 ### Implementation notes
 
@@ -171,10 +173,12 @@ The lease state machine models the full one-to-one protocol: guard phase (`Guard
 
 Three timeouts keep a message loss from stranding a lease (each detailed in the engine's `const` and fn doc-comments):
 
-- **Guard-phase retry (grantor):** a `Guarding` attempt unanswered for `GUARD_RETRY_TIMEOUT` (500 ticks) falls back to `Inactive`, so per-poll `initiate_chance` re-guards — otherwise a dropped `Guard`/`GuardReply` strands the grantor in `Guarding`.
-- **Guard-window expiry (grantee):** a `Guarding` grantee whose activating first `Renew` never arrives expires once its guard deadline `A'` lapses (checked in `recompute_statuses`), mirroring the grantor-side retry.
-- **Renew-reply timeout (grantor):** each `send_renew` re-extends `D'` past `now`, so a silent grantee (all `Renew`s/replies dropped) would renew forever; `expire_stale_renews` stops renewing after `RENEW_REPLY_TIMEOUT` (1500 ≈ one `t_lease`) with no confirmation, letting `D'` lapse so the lease re-guards.
+- **Guard-phase give-up (grantor):** a `Guarding` attempt unanswered for a full guard window `t_guard − t_delta` (same length as the grantee's `A'`) falls back to `Inactive`; re-guarding is then the ordinary per-poll `initiate_chance` path, which begins *from* that idle state — so a dropped `Guard`/`GuardReply` never strands the grantor, and a retry is a whole guard phase away, not a fraction of one. (There is no separate short retry timer — the grantor holds the guard for exactly as long as the grantee would still accept the activating renew.)
+- **Guard-window expiry (grantee):** a `Guarding` grantee whose activating first `Renew` never arrives expires once its guard deadline `A'` lapses (checked in `recompute_statuses`), mirroring the grantor-side give-up.
+- **One renew in flight + renew-reply timeout (grantor):** the grantor sends the next `Renew` only once the previous one's reply is confirmed (`awaiting_reply`), so a dropped reply *halts* the renew stream rather than sending more un-acked renews. It then waits, and after `RENEW_REPLY_TIMEOUT` (1500 ≈ one `t_lease`) with no confirmation `expire_stale_renews` stops intending the lease (an `awaiting_reply` lease would otherwise hold its `D'`/intent forever), letting `D'` lapse so the lease expires and re-guards.
 
-Countdown bars vs. safety expiry: a `LeaseBar`'s `*_fill` is the fraction of one `t_lease` span remaining, drawn from each party's *display* expiry. The grantee uses its real `hold_expiry` (`C'`), which already sits one span from receipt. The grantor's safety bound `grant_expiry` (`D'`) is deliberately over-provisioned (`≈ B' + t_lease + t_delta`, and only ever `max`'d up per renew), so it exceeds one span and would peg the bar at full for most of the lease; the grantor therefore keeps a separate `display_expiry` = last reachability proof (activating `GuardReply`, then each `RenewReply`) + `t_lease`, used *only* for `grantor_fill`. This mirrors the grantee's hold so the grantor bar starts full and drains cleanly, refilling on each reply — a display concern that never touches the safety-critical `grant_expiry`.
+Countdown bars: a `LeaseBar`'s `*_fill` is the fraction remaining toward each party's **real** expiry — the grantee's `hold_expiry` (`C'`) and the grantor's `grant_expiry` (`D'`). There is no separate display timer; the bar *is* the safety bound, so it can never drift out of sync with the actual gray-out. Each is normalized by the span its bound is set a whole *away* from at (re)arm — the grantee's `C'` by `t_lease − t_delta` (its distance from receipt), the grantor's `D'` by the full provisioned grant span `t_guard + t_lease + 2·t_delta` (its distance from the send, see `send_renew`). That normalization is what keeps the bar **always draining** rather than pegged: the fill hits 1.0 only at the instant of (re)arm and falls continuously from there. So both sides show a clean sawtooth while renewing — the grantor's `D'` maintained by extend-on-send / shorten-on-reply (see [algorithm.md](algorithm.md#phase-2--renew-steady-state-promise-exchanges)) — and once replies stop, `D'` holds at its last value and the bar drains smoothly to 0 exactly at expiry. (Normalizing the over-provisioned `D'` by only `t_lease` would instead peg the bar at full until `local` came within a span of `D'`, then drain — the bug this avoids.)
+
+The *guard-phase* bars drain over the guard-phase length `t_guard − t_delta` on both sides, and read identically. The grantee's is its real acceptance window `A'` (`guard_deadline`), a genuine protocol deadline. The grantor has **no** protocol guard deadline — it just awaits the `GuardReply` — but it holds the guard for the same span before giving up (`expire_stale_guards`), so `grantor_fill` while `Guarding` counts down from `guard_since` over that same window; the bar reaching empty coincides with the grantor falling idle. This is both faithful (the two sides run equal-length guard timers) and consistent on screen (neither guard bar drains faster than the other or than the active bars).
 
 Other invariants: safety (`grantor expiry >= grantee expiry` in real time) is test-checked under perfect and skewed/drifting clocks; `frame_at` is read-only and pull-based (the frontend calls `advance_to(t)` then `frame_at(t)` per animation tick); stochastic hazards, timeouts, and expiry detection are quantized to `POLL_INTERVAL` (50 ticks), while commands/sends/arrivals fire at their exact scheduled tick.

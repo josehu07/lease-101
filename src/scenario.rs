@@ -23,6 +23,22 @@ pub struct LeaseParams {
     pub renew_interval: Time,
 }
 
+impl LeaseParams {
+    /// The guard window `A' = t_guard − t_delta`: how long a grantee accepts the
+    /// activating first renew, and equally how long a grantor holds an unanswered
+    /// guard before giving up.
+    pub fn guard_window(&self) -> Time {
+        self.t_guard - self.t_delta
+    }
+
+    /// The grantor's provisioned no-reply grant span `B' + (t_lease + t_delta)`
+    /// where `B' = send + (t_guard + t_delta)` — i.e. `t_guard + t_lease + 2·t_delta`
+    /// past a renew's send. The full length the grantor's `D'` is armed to on send.
+    pub fn grant_span(&self) -> Time {
+        self.t_guard + self.t_lease + 2 * self.t_delta
+    }
+}
+
 impl Default for LeaseParams {
     fn default() -> Self {
         Self {
@@ -107,6 +123,11 @@ pub struct Scenario {
     /// [`MsgKind::index`]. Layered on top of a link's own `drop_chance`, so a
     /// caller can e.g. fail all `Guard`s without touching link reliability.
     pub kind_drop: [f64; MsgKind::COUNT],
+    /// Global tick at which each kind's `kind_drop` starts applying. Before it,
+    /// that kind is never dropped by `kind_drop` (0 = drop from the start).
+    /// Lets a scenario establish cleanly and *then* begin losing a message kind —
+    /// e.g. dropping `RenewReply`s only once the lease is already active.
+    pub kind_drop_from: [Time; MsgKind::COUNT],
     /// Scripted commands, each paired with the global time it fires at. Run in
     /// addition to any stochastic behavior, and replay identically per seed.
     pub commands: Vec<(Time, Command)>,
@@ -116,9 +137,9 @@ pub struct Scenario {
     /// to never issue writes. Each round waits this long ± a small jitter.
     pub write_interval: Option<Time>,
     /// Whether writes are *disruptive*: if set, a write suspends the read leases
-    /// each node holds until it commits, then lets them re-activate; if unset,
-    /// writes leave leases entirely untouched (see the engine's write path).
-    /// Ignored when `write_interval` is `None`.
+    /// each node holds until it commits, then re-establishes them via a fresh
+    /// guard round; if unset, writes leave leases entirely untouched (see the
+    /// engine's write path). Ignored when `write_interval` is `None`.
     pub write_disruptive: bool,
 }
 
@@ -132,6 +153,7 @@ impl Scenario {
             links: Vec::new(),
             leases: Vec::new(),
             kind_drop: [0.0; MsgKind::COUNT],
+            kind_drop_from: [0; MsgKind::COUNT],
             commands: Vec::new(),
             duration: 20_000,
             write_interval: None,
@@ -195,6 +217,15 @@ impl Scenario {
     /// per-link `drop_chance`. `p` is clamped to `[0, 1]`.
     pub fn kind_drop(mut self, kind: MsgKind, p: f64) -> Self {
         self.kind_drop[kind.index()] = p.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Like [`kind_drop`](Self::kind_drop), but the drop only takes effect from
+    /// global tick `from` onward; before that the kind is delivered normally.
+    /// Handy for "establish, then start losing this message kind" scenarios.
+    pub fn kind_drop_from(mut self, kind: MsgKind, p: f64, from: Time) -> Self {
+        self.kind_drop[kind.index()] = p.clamp(0.0, 1.0);
+        self.kind_drop_from[kind.index()] = from;
         self
     }
 

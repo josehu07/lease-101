@@ -9,6 +9,8 @@ use dioxus::prelude::*;
 mod components;
 mod content;
 mod playground;
+mod scenarios;
+mod sim_view;
 
 use components::Route;
 

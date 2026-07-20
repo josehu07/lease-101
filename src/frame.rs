@@ -2,8 +2,8 @@
 //!
 //! The engine produces discrete events; the frame layer turns the state at an
 //! arbitrary global time into drawable primitives (node disks, in-flight message
-//! dots, lease-timer bars). Both the live Canvas2D frontend and the native GIF
-//! tool consume identical [`Frame`]s, so layout/interpolation lives here once.
+//! glyphs, lease-timer bars). The live web frontend paints these [`Frame`]s (as
+//! will a planned native GIF renderer), so layout/interpolation lives here once.
 
 use crate::clock::Time;
 use crate::event::{LeaseStatus, MsgFate, MsgKind, NodeId};

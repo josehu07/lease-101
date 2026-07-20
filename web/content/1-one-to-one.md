@@ -4,33 +4,27 @@ kind = "algo"
 step = "01"
 pattern = "one-to-one"
 title = "Standard One-to-One Leasing"
-figure_caption = "One grantor → one grantee: guard handshake, renew loop, and the two expiry timers ticking with their ±t_Δ offset."
 +++
 
 The base primitive: one grantor promises one grantee.
 
-Leases need only *bounded drift*, never synchronized clocks. Each node checks
-expiry against its own clock, never comparing timestamps — so a constant skew
-cancels out. Only drift *within* one period matters, and a small budget
-<span class="var">t<sub>Δ</sub></span> covers it.
+One *invariant* holds at all times: the grantor expires the lease no earlier than the grantee does, so the grantee never believes on a lease the grantor has dropped.
 
-One invariant holds across every renewal:
+Lease only requires *bounded clock drift* between the two sides, i.e., the speed of time flowing does not differ by more than <span class="var">t<sub>Δ</sub></span>.
 
-> The grantor expires the lease no *earlier* than the grantee does.
+How do we hold the invariant true without synchronized timestamps? Via messages. Two phases:
 
-So the grantee never acts on a lease the grantor has dropped. Asymmetric slack
-(±<span class="var">t<sub>Δ</sub></span>) keeps it true: the grantee expires a
-touch early, the grantor a touch late, so the grantor's window always covers the
-grantee's. Two phases:
+1. **Guard** (once). Tames the unknown delay of the first message -- the grantee accepts the first renewal only inside a self-imposed window, letting the grantor bound expiry before any reply.
+2. **Renew** (steady state). The lease starts on the first renewal (if received timely before guard expiry); a renew exchange loop at sub-timeout intervals keeps the lease alive.
 
-1. **Guard** (once). Tames the *unknown* delay of the first message — the grantee
-   accepts the first renewal only inside a self-imposed window, letting the
-   grantor bound expiry before any reply.
-2. **Renew** (steady state). The lease starts on the first renewal; a renew loop
-   at sub-timeout intervals keeps it fresh, off the critical path — free in the
-   common case.
+:::figure one-to-one-success
 
-To end a lease, the grantor either *revokes* it or just withholds renewals and
-waits out the expiry — the same path a failure takes, with no external oracle.
+:::figure one-to-one-guard-reply-lost
 
-:::figure
+Lease ends at either when the grantor proactively *revokes* it, or when renewals don't arrive before expiry -- the expiration mechanism makes lease failure-resilient.
+
+:::figure one-to-one-revoked
+
+:::figure one-to-one-renew-replies-lost
+
+Notice the grantor-side timer dance: every renewal it sends pessimistically *extends* grantor's expiry (in case the reply never comes back), and upon receiving the reply it *tightens* expiry calculation back to the confirmed receipt.

@@ -66,7 +66,14 @@ Timer durations (note the asymmetric `±t_Δ`):
 | Grantor (no RenewReply) grants until | `D' = B' + (t_lease + t_Δ)`, where `B' = B + (t_guard + t_Δ)` | expires **later** |
 | Grantor (got RenewReply at D) grants until | `D' = D + (t_lease + t_Δ)` | tighter, anchored on confirmed receipt |
 
-When the grantor gets *no* RenewReply, it falls back from anchoring on `D` to anchoring on the guard-window close `B'` (the "D' is here if missing RenewReply" case in Figure 2).
+The grantor maintains its single `D'` by an **extend-on-send / shorten-on-reply** rule, so it is always safe yet as tight as confirmations allow:
+
+- **On sending each `Renew`**, it *extends* `D'` to the pessimistic no-reply bound (`max` up to `B' + (t_lease + t_Δ)`), so even if that renew is received but its reply is lost, `D'` still dominates the grantee's `C'`.
+- **On receiving a `RenewReply`** (confirming receipt at grantor-local `D`), it *shortens* `D'` back to the tighter `D + (t_lease + t_Δ)` (`min`).
+
+So under healthy renewals `D'` tracks the last confirmed receipt (tight, only a bit past one lease span ahead); when replies stop, `D'` holds at its last pessimistic value and the lease expires there — the grantor never expires earlier than the grantee. This is one bound, not two separate timers: the rows above are just its extended vs. shortened states.
+
+The grantor keeps **at most one renew in flight**: it sends the next `Renew` only after the previous one's `RenewReply` is confirmed. So a lost reply *stops* the renew stream — the grantor waits rather than firing further un-acked renews — and if the silence persists a lease-lifetime (no reply since the last confirmation), the grantor gives up: it stops renewing and lets `D'` lapse, expiring the lease and returning idle to re-guard.
 
 The renewal exchanges continue on repeatedly, until either side decides to proactively terminate the lease, or some failure happens causing lease expiration. Renewal intervals are typically fractional to lease expiration timeouts, to keep the cycles on repeat under healthy situations.
 
@@ -104,13 +111,13 @@ Each `(node → leader)` lease is exactly a standard one-to-one lease from the p
 | Grantors | 1 | every node (all `n`) |
 | Grantee | 1 | the current leader (one node when stable) |
 | Direction | fixed pair | all nodes → leader |
-| Safe count | 1 | leader is stable once it holds `≥ m = ⌈n/2⌉` |
+| Safe count | 1 | leader is stable once it holds `≥ m = ⌊n/2⌋+1` |
 
 The leader is an implicit self-granter: it counts a lease to itself among the `m`.
 
 ### The majority rule
 
-A leader `S` collects the leases granted *to* it. Once `S` holds at least a majority `m = ⌈n/2⌉` of leases (including its own), it can safely assert it is **the only such leader in the cluster** — the *stable leader*. Two nodes cannot each hold a majority of leases at the same time, because the two majorities would overlap in at least one node, and that node grants to at most one leader at a time (it invalidates any old lease before granting a new one). This is the same quorum-intersection argument that underpins consensus, now applied to leases.
+A leader `S` collects the leases granted *to* it. Once `S` holds at least a majority `m = ⌊n/2⌋+1` of leases (including its own), it can safely assert it is **the only such leader in the cluster** — the *stable leader*. Two nodes cannot each hold a majority of leases at the same time, because the two majorities would overlap in at least one node, and that node grants to at most one leader at a time (it invalidates any old lease before granting a new one). This is the same quorum-intersection argument that underpins consensus, now applied to leases.
 
 ### Why it enables local reads
 
@@ -140,7 +147,7 @@ A **quorum lease** extends local reads to a *chosen subset* of replicas, picked 
 - `Q` — the **lease quorum**: the subset of replicas that hold the lease (any size, even fewer than half). Each `r ∈ Q` is a *lease holder* / local reader.
 - `O` — the **granted objects**: the set of objects this lease covers.
 
-Every replica `g` that grants `(Q, O)` to a holder `r` promises two things: (1) it will **notify `r` synchronously before committing** any update to an object in `O` that `g` proposes, and (2) it will only acknowledge `Accept`/`Prepare` for updates to `O` on the condition that the proposer also notifies `r` synchronously first. Local read on a holder becomes **active** once a **majority** `m = ⌈n/2⌉` of replicas (the holder counting as an implicit self-grantor) have granted it.
+Every replica `g` that grants `(Q, O)` to a holder `r` promises two things: (1) it will **notify `r` synchronously before committing** any update to an object in `O` that `g` proposes, and (2) it will only acknowledge `Accept`/`Prepare` for updates to `O` on the condition that the proposer also notifies `r` synchronously first. Local read on a holder becomes **active** once a **majority** `m = ⌊n/2⌋+1` of replicas (the holder counting as an implicit self-grantor) have granted it.
 
 Content of lease promise: no write without notifying
 
@@ -162,7 +169,7 @@ Because the write path carries the revocation, an in-progress write to a leased 
 | Local readers | leader only | a configurable subset `Q` per object |
 | Promise content | "you are the stable leader" | "I won't modify `O` without notifying you" |
 | Granularity | whole cluster, one role | per-object `(Q, O)` |
-| Grantors for active | `≥ m = ⌈n/2⌉` | `≥ m = ⌈n/2⌉` |
+| Grantors for active | `≥ m = ⌊n/2⌋+1` | `≥ m = ⌊n/2⌋+1` |
 | Coupling | off the critical path | **on it** — revocation bundled into the write's Paxos quorum |
 
 ### Pro & Con of Quorum Leases (that motivated Bodega)
@@ -186,7 +193,7 @@ Content of lease promise: generalized cluster roster metadata
 
 ### The all-to-all pattern
 
-Every node is both grantor and grantee, exchanging the same one-to-one primitive with every peer. Each node tracks the guards/renewals it grants (`renewTo`) and holds (`renewBy`). The counting rule mirrors leader leases: a node whose `|renewBy| ≥ m = ⌈n/2⌉` knows a **majority agrees on its `⟨bal, ros⟩`**, so at most one such roster can exist — the *stable roster*. This is the precondition for any local read.
+Every node is both grantor and grantee, exchanging the same one-to-one primitive with every peer. Each node tracks the guards/renewals it grants (`renewTo`) and holds (`renewBy`). The counting rule mirrors leader leases: a node whose `|renewBy| ≥ m = ⌊n/2⌋+1` knows a **majority agrees on its `⟨bal, ros⟩`**, so at most one such roster can exist — the *stable roster*. This is the precondition for any local read.
 
 | | Leader Leases | Quorum Leases | Roster Leases |
 | --- | --- | --- | --- |

@@ -106,6 +106,24 @@ body {
     line-height: 0;
 }
 
+/* ---- Footer ----------------------------------------------------------- */
+
+.footer {
+    padding-top: 2rem;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.footer a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.footer a:hover {
+    text-decoration: underline;
+}
+
 .page {
     max-width: var(--max-width);
     margin: 0 auto;
@@ -278,26 +296,10 @@ body {
     color: var(--danger);
 }
 
-/* ---- Simulation figure: placeholder + descriptive caption ------------- */
+/* ---- Simulation figure ------------------------------------------------ */
 
 .sim-figure {
-    margin: 1.5rem 0 0;
-}
-
-.footer {
-    padding-top: 2rem;
-    border-top: 1px solid var(--border);
-    color: var(--muted);
-    font-size: 0.9rem;
-}
-
-.footer a {
-    color: var(--accent);
-    text-decoration: none;
-}
-
-.footer a:hover {
-    text-decoration: underline;
+    margin: 1.5rem 0 2.25rem;
 }
 
 .sim-placeholder {
@@ -312,15 +314,6 @@ body {
     letter-spacing: 0.08em;
 }
 
-/* Caption under a simulation figure: describes what the finished animation
-   will show. Reads as a muted footnote, like the playground's caption. */
-.sim-caption {
-    margin: 0.6rem 0 0;
-    color: var(--muted);
-    font-size: 0.85rem;
-    line-height: 1.6;
-}
-
 /* ---- Final recap table ------------------------------------------------ */
 
 .recap-lead {
@@ -328,14 +321,14 @@ body {
 }
 
 .recap {
-    margin-top: 0.4rem;
+    margin-top: 1.4rem;
     overflow-x: auto;
 }
 
 .recap-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.95rem;
+    font-size: 1.05rem;
 }
 
 .recap-table th,
@@ -391,7 +384,7 @@ body {
 
 .pg-label {
     flex: 0 0 4.5rem;
-    font-size: 0.85rem;
+    font-size: 0.95rem;
     font-weight: 600;
     color: var(--muted);
 }
@@ -436,7 +429,9 @@ body {
     transform: translateY(1px);
 }
 
-.pg-pill.is-on {
+/* Selected pill / id toggle: solid accent fill. (`.pg-ff.is-on` matches this.) */
+.pg-pill.is-on,
+.pg-id.is-on {
     background: var(--accent);
     border-color: var(--accent);
     color: #fff;
@@ -449,12 +444,6 @@ body {
     font-size: 0.9rem;
     font-variant-numeric: tabular-nums;
     text-align: center;
-}
-
-.pg-id.is-on {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
 }
 
 /* The "All" toggle sits slightly apart from the numbered ids. */
@@ -473,6 +462,14 @@ body {
     gap: 1.1rem;
 }
 
+/* A request kind and its reply stacked vertically (Guard over its Reply, Renew
+   over its Reply), so the reply-drop switch sits directly under its request. */
+.pg-fail-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
 /* One switch: its kind label, then a segmented group of rate pills. */
 .pg-fail {
     display: flex;
@@ -480,13 +477,17 @@ body {
     gap: 0.5rem;
 }
 
+/* Fixed label width so the pill bars of a request and its reply line up in the
+   stack (labels vary: Guard / Renew / Reply). */
 .pg-fail-label {
+    flex: 0 0 auto;
+    min-width: 2.9rem;
     font-size: 0.85rem;
     color: var(--muted);
     white-space: nowrap;
 }
 
-/* Segmented control: the three rate pills butt together into one bar. */
+/* Segmented control: the five rate pills butt together into one bar. */
 .pg-fail-pills {
     display: inline-flex;
     border: 1px solid var(--border);
@@ -545,16 +546,31 @@ body {
 .pg-stage {
     position: relative;
     width: 100%;
-    /* Full container width, as before. Taller than the old 460px cap so 9-node,
-       everything-on scenarios have more vertical room; the aspect-ratio keeps it
-       square on narrower viewports where width falls below the height cap. */
+    /* Full container width; the aspect-ratio keeps it square on narrow viewports
+       where width falls below the height cap. The height cap trims the empty
+       vertical margin around the ring on wide (desktop) viewports — kept large
+       enough that a busy 9-node, everything-on layout still fits. Only the
+       playground uses this cap; fit-height walkthrough canvases override it. */
     aspect-ratio: 1 / 1;
-    max-height: 580px;
+    max-height: 530px;
     margin-top: 0.5rem;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    overflow: hidden;
+    /* Clip the animation to the rounded box, but leave a margin so a timer bar's
+       hover tooltip (which pops just above the bar) can escape the top/side edges
+       instead of being cut off. `clip` + `overflow-clip-margin` keeps the busy-
+       scenario stack containment while giving tooltips room to breathe. */
+    overflow: clip;
+    overflow-clip-margin: 2rem;
+}
+
+/* Fit-height stage (walkthrough scenario canvases): the box is cropped to its
+   content, so the aspect-ratio is set inline per scenario and there is no square
+   default or height cap to fight it. */
+.pg-stage.is-fit {
+    aspect-ratio: auto;
+    max-height: none;
 }
 
 /* Gray footnote under the stage describing the fixed timing constants. */
@@ -775,6 +791,14 @@ body {
     animation: pg-node-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* Each node is its own stacking context (it has a `transform`), so by default a
+   node's timer-bar tooltip paints beneath any later sibling node — most visibly
+   under another node's crown. Lift the hovered node above all siblings so its
+   tooltip sits on top of everything in the stage. */
+.pg-node:hover {
+    z-index: 5;
+}
+
 /* A grantor is orange, a grantee green (mirroring Figure 2); a node that is
    both gets a split fill. The border stays gray in every case. */
 .pg-node.is-grantor {
@@ -845,6 +869,14 @@ body {
     gap: 0.45rem;
     pointer-events: none;
     z-index: 1;
+}
+
+/* While hovering a timer cell, lift the whole stack above the crown (z-index 2,
+   a sibling above this container) so its tooltip is never painted under the
+   crown. The hover reaches this `pointer-events: none` container because its
+   inner `.pg-timer-cell` re-enables pointer events. */
+.pg-node-timers:hover {
+    z-index: 6;
 }
 
 /* One column of same-role bars under an OUT / IN header. */
@@ -930,7 +962,19 @@ body {
     background: var(--grantee);
 }
 
-/* An inactive lease (guarding / idle / expired): the bar is filled solid gray
+/* A guarding lease's countdown drains in blue (matching the guarding lease edge
+   / arrowhead), so the guard phase reads distinctly from the active-lease role
+   colors. Slightly darker on the OUT (grantor) side, lighter on the IN
+   (grantee) side, echoing the OUT-darker / IN-lighter convention. */
+.pg-timer-col.is-out .pg-timer-fill.is-guarding {
+    background: color-mix(in srgb, var(--accent) 80%, #000);
+}
+
+.pg-timer-col.is-in .pg-timer-fill.is-guarding {
+    background: color-mix(in srgb, var(--accent) 72%, #fff);
+}
+
+/* An inactive lease (idle / expired): the bar is filled solid gray
    rather than left empty, so it reads as "no live countdown" and not as an
    almost-drained active bar. Selector kept specific enough to override the
    per-column role colors above. */
@@ -1026,8 +1070,11 @@ body {
     transform: translateY(1px);
 }
 
+/* A disabled action button is pure white (outlined, muted text), visibly
+   distinct from any clickable state — the Play button when locked after a run
+   stops, or when no lease is selected. */
 .pg-btn:disabled {
-    background: var(--border);
+    background: #fff;
     border-color: var(--border);
     color: var(--muted);
     cursor: not-allowed;
@@ -1043,20 +1090,31 @@ body {
     background: #b32a30;
 }
 
-/* Restart (ghost) variant: a quiet outlined button, gray/disabled until a run
-   exists. Left-aligned in its grid cell so it sits under the run button. */
+/* Restart (ghost) variant: a quiet gray button (matching the fast-forward pill),
+   gray/disabled until a run exists. Left-aligned in its grid cell so it sits
+   under the run button. */
 .pg-btn.is-ghost {
     justify-self: start;
-    background: transparent;
+    background: var(--surface);
     border-color: var(--border);
     color: var(--muted);
     font-weight: 600;
 }
 
 .pg-btn.is-ghost:hover:not(:disabled) {
-    background: var(--surface);
+    background: color-mix(in srgb, var(--surface) 80%, #000);
     border-color: var(--muted);
     color: var(--text);
+}
+
+/* Disabled Restart: pure white, so it reads as clearly not-clickable versus its
+   gray enabled state. (Needs its own rule to beat `.pg-btn.is-ghost`'s gray
+   background at equal specificity.) */
+.pg-btn.is-ghost:disabled {
+    background: #fff;
+    border-color: var(--border);
+    color: var(--muted);
+    cursor: not-allowed;
 }
 
 /* Fast-forward toggle in the time-axis status cell (under the run status): a
@@ -1120,7 +1178,6 @@ body {
     font-weight: 600;
 }
 
-
 /* A small spinning ring shown while a run is generating. */
 .pg-spinner {
     width: 0.9rem;
@@ -1137,7 +1194,7 @@ body {
     }
 }
 
-/* ---- Playback frame: lease edges, message dots, majority glow -------- */
+/* ---- Playback frame: lease edges, message glyphs, majority glow ------ */
 
 /* Lease edges colored by the grantee's view; opacity is set inline from the
    remaining lease life so an active lease visibly counts down. */
@@ -1159,9 +1216,10 @@ body {
     stroke: var(--border);
 }
 
-/* An in-flight message: a phase-colored glyph (shield / renew / dot) placed at
-   its interpolated position. `color` drives the glyph fill via `currentColor`;
-   the chip itself is transparent so the icon shape reads. */
+/* An in-flight message: a phase-colored glyph (shield / renew arrow /
+   prohibition ring / pencil / checkmark) placed at its interpolated position.
+   `color` drives the glyph fill via `currentColor`; the chip itself is
+   transparent so the icon shape reads. */
 .pg-msg {
     position: absolute;
     width: 1.55rem;
@@ -1220,6 +1278,10 @@ body {
     color: color-mix(in srgb, var(--grantee) 90%, #fff);
 }
 
+.pg-msg.is-revoke.is-reply {
+    color: color-mix(in srgb, var(--grantor) 92%, #fff);
+}
+
 .pg-msg.is-write.is-reply {
     color: #8a5fe0;
 }
@@ -1231,17 +1293,6 @@ body {
     height: 100%;
     fill: currentColor;
     filter: drop-shadow(0 1px 2px rgba(16, 35, 63, 0.35));
-}
-
-/* Revoke keeps the old filled dot, centered in the chip. */
-.pg-msg-dot {
-    display: block;
-    width: 1rem;
-    height: 1rem;
-    margin: auto;
-    border-radius: 50%;
-    background: currentColor;
-    box-shadow: 0 1px 3px rgba(16, 35, 63, 0.3);
 }
 
 /* Thumbs-up badge on reply messages, tucked at the top-right like a
@@ -1329,6 +1380,10 @@ body {
     stroke-width: 2;
     stroke-linecap: round;
     stroke-linejoin: round;
+    /* Nudge the clock glyph rightward into the grid gap so it hugs the slider's
+       left edge more closely (the shared `column-gap` stays put to keep every
+       row aligned). */
+    margin-right: -0.4rem;
 }
 
 /* The slider fills the track column; fully custom so the thumb can be a
@@ -1458,9 +1513,26 @@ body {
     left: 1rem;
     top: 50%;
     transform: translateY(-50%);
-    font-size: 0.85rem;
+    font-size: 0.95rem;
     font-weight: 600;
     color: var(--muted);
+}
+
+/* "you can drag" cue to the right of the bars, vertically centered against the
+   whole group. Shown only while the timeline slider is scrubbable. Faint so it
+   reads as an unobtrusive hint. Its left edge is placed exactly where the run
+   status text starts (`--pg-status` column, `0.5rem` in) — the bars share the
+   run bar's grid, so the bar and slider right edges line up, and this makes the
+   cue's gap from the bars match the status message's gap from the slider. */
+.pg-grants-drag {
+    position: absolute;
+    left: calc(100% - var(--pg-status) + 0.5rem);
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.82rem;
+    color: var(--muted);
+    white-space: nowrap;
+    pointer-events: none;
 }
 
 .pg-grantbars {
@@ -1559,6 +1631,42 @@ body {
 .pg-grantbar-seg:hover::before {
     opacity: 1;
     visibility: visible;
+}
+
+/* ---- Walkthrough scenario canvas ------------------------------------- */
+
+/* A hardcoded scenario figure reuses the playground's canvas + run bar + grant
+   bars (`.pg-root`), minus the editing controls. The whole thing — title, canvas,
+   run bar, grant bars — is boxed in a very light gray panel (lighter than the
+   canvas's own `--surface` gray) so it reads as one self-contained animation unit
+   without competing with the canvas inside it. */
+.sc-root {
+    gap: 0.7rem;
+    padding: 1rem 1.1rem 0.7rem;
+    background: color-mix(in srgb, var(--surface) 40%, #fff);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+/* Canvas keeps its usual `--surface` background (set on `.pg-stage`); just drop
+   its top margin since the box already supplies padding. */
+.sc-root .pg-stage {
+    margin-top: 0;
+}
+
+/* Give the grant bars a bit more breathing room above (separating them from the
+   time axis) while the box's reduced bottom padding tucks them nearer the border. */
+.sc-root .pg-grants {
+    margin-top: 0.7rem;
+}
+
+/* Scenario title, above the canvas (not inside it): a short label of what the
+   figure shows, reading as the box's heading. */
+.sc-title {
+    color: #333a45;
+    font-size: 1.02rem;
+    font-weight: 600;
+    line-height: 1.3;
 }
 
 @media (max-width: 560px) {

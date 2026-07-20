@@ -8,9 +8,9 @@ use dioxus::prelude::*;
 
 use crate::content::{self, Block, Section as SectionData};
 
-/// Base browser-tab title (matches `Dioxus.toml`'s `web.app.title`). Routes set
-/// this via `document::Title` so navigating between them updates the tab; `/sim`
-/// appends a playground suffix.
+/// Base browser-tab title (matches `Dioxus.toml`'s `web.app.title`), used on the
+/// home route. Routes set the tab title via `document::Title`; `/sim` uses its
+/// own standalone "Lease Sim Playground".
 const BASE_TITLE: &str = "Bodega Consensus";
 
 /// Client-side routes. The home walkthrough and a standalone simulator page,
@@ -35,9 +35,9 @@ fn Shell() -> Element {
 }
 
 /// Home: the single-page walkthrough. An intro establishes the lease primitive,
-/// then four sections climb the progression — one-to-one → leader → quorum →
-/// roster — each motivated by the limitation of the one before it. Every
-/// section's prose lives in `content/*.md`; here we just template it.
+/// then sections climb the progression — one-to-one → lease manager → leader →
+/// quorum → roster — each motivated by the limitation of the one before it.
+/// Every section's prose lives in `content/*.md`; here we just template it.
 #[component]
 fn Home() -> Element {
     rsx! {
@@ -89,8 +89,8 @@ fn SectionBlock(section: &'static SectionData, block: &'static Block) -> Element
         Block::Html(html) => rsx! {
             div { class: "prose", dangerous_inner_html: "{html}" }
         },
-        Block::Figure => rsx! {
-            SimFigure { caption: section.figure_caption }
+        Block::Figure(name) => rsx! {
+            crate::scenarios::ScenarioCanvas { name: name.to_string() }
         },
         Block::Tradeoff => match section.tradeoff {
             Some((pro, con)) => rsx! {
@@ -108,11 +108,11 @@ fn SectionBlock(section: &'static SectionData, block: &'static Block) -> Element
 }
 
 /// Sim: a standalone simulator playground with scenario-setup controls over a
-/// live canvas. Wiring it to a running `lease_sim` engine comes next.
+/// live `lease_sim`-driven canvas (hosts `Playground`).
 #[component]
 fn Sim() -> Element {
     rsx! {
-        document::Title { "{BASE_TITLE} — Lease Sim Playground" }
+        document::Title { "Lease Sim Playground" }
         main { id: "top", class: "page",
             section { class: "section pg-section",
                 h2 { "Distributed Lease Simulator Playground" }
@@ -137,7 +137,12 @@ fn Footer() -> Element {
                 "https://josehu.com"
             }
             "); Plain blog post version of the walkthrough is also available "
-            a { href: "TODO", target: "_blank", rel: "noopener noreferrer", "here" }
+            a {
+                href: "https://www.josehu.com/technical/2026/07/07/distributed-lease-and-consensus.html",
+                target: "_blank",
+                rel: "noopener noreferrer",
+                "here"
+            }
             "."
         }
     }
@@ -158,7 +163,7 @@ fn Nav() -> Element {
                         "📄 Paper"
                     }
                     a {
-                        href: "https://github.com/josehu07/summerset/tree/main/tla%2B/bodega_roster_lease",
+                        href: "https://github.com/josehu07/summerset/tree/main/tla%2B/bodega",
                         target: "_blank",
                         rel: "noopener noreferrer",
                         "📐 TLA"
@@ -176,7 +181,12 @@ fn Nav() -> Element {
                         rel: "noopener noreferrer",
                         "🌐 Web"
                     }
-                    Link { to: Route::Sim {}, "🕹️ Sim*" }
+                    a {
+                        href: "/sim",
+                        target: "_blank",
+                        rel: "noopener noreferrer",
+                        "🕹️ Sim*"
+                    }
                 }
             }
         }
@@ -196,21 +206,6 @@ fn Tradeoff(pro: &'static str, con: &'static str) -> Element {
                 span { class: "tradeoff-tag", "Con" }
                 span { "{con}" }
             }
-        }
-    }
-}
-
-/// A placeholder for a live `lease_sim` animation, with a descriptive caption of
-/// what the finished animation will show. Swapped for the real canvas later
-/// (see `docs/design/webpage.md`).
-#[component]
-fn SimFigure(caption: &'static str) -> Element {
-    rsx! {
-        figure { class: "sim-figure",
-            div { class: "sim-placeholder",
-                span { "simulation canvas" }
-            }
-            figcaption { class: "sim-caption", "{caption}" }
         }
     }
 }

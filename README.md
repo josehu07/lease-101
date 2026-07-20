@@ -8,8 +8,8 @@ This repo is a minimal demo bundle for the arcane art of distributed lease algor
 | | |
 | --- | --- |
 | Website: | [bodega-consensus.com](https://bodega-consensus.com) |
-| Blog: | [blog post link](TODO) |
-| Bodega Paper: | [OSDI '26 paper link](https://www.usenix.org/conference/osdi26/presentation/hu-guanzhou) |
+| Plain blog: | [blog post link](https://www.josehu.com/technical/2026/07/07/distributed-lease-and-consensus.html) |
+| Bodega paper: | [OSDI '26 paper link](https://www.usenix.org/conference/osdi26/presentation/hu-guanzhou) |
 | Summerset: | [KV codebase link](https://github.com/josehu07/summerset) |
 
 A distilled summary of lease algorithms and the design of this demo project are documented under [docs/](docs/DESIGN.md).

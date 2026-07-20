@@ -24,10 +24,11 @@ use serde::Deserialize;
 const FILES: &[&str] = &[
     "0-intro",
     "1-one-to-one",
-    "2-leader-leases",
-    "3-quorum-leases",
-    "4-roster-leases",
-    "5-bodega",
+    "2-lease-manager",
+    "3-leader-leases",
+    "4-quorum-leases",
+    "5-roster-leases",
+    "6-bodega",
 ];
 
 /// Front-matter schema. Only `id`, `kind`, and `title` are required; the rest
@@ -41,8 +42,6 @@ struct FrontMatter {
     step: String,
     #[serde(default)]
     pattern: String,
-    #[serde(default)]
-    figure_caption: String,
     #[serde(default)]
     tradeoff_pro: String,
     #[serde(default)]
@@ -107,7 +106,7 @@ fn render_section(front: &FrontMatter, body: &str) -> String {
         .into_iter()
         .map(|b| match b {
             Block::Html(md) => format!("Block::Html({})", lit(&markdown(md))),
-            Block::Figure => "Block::Figure".into(),
+            Block::Figure(name) => format!("Block::Figure({})", lit(name)),
             Block::Tradeoff => "Block::Tradeoff".into(),
             Block::Recap => "Block::Recap".into(),
         })
@@ -140,13 +139,12 @@ fn render_section(front: &FrontMatter, body: &str) -> String {
 
     format!(
         "Section {{ id: {}, kind: {}, step: {}, pattern: {}, title: {}, \
-         figure_caption: {}, tradeoff: {}, recap_lead: {}, recap: &[{}], blocks: &[{}] }}",
+         tradeoff: {}, recap_lead: {}, recap: &[{}], blocks: &[{}] }}",
         lit(&front.id),
         lit(&front.kind),
         lit(&front.step),
         lit(&front.pattern),
         lit(&front.title),
-        lit(&front.figure_caption),
         tradeoff,
         lit(&front.recap_lead),
         recap,
@@ -158,24 +156,30 @@ fn render_section(front: &FrontMatter, body: &str) -> String {
 /// marker positioned within the prose flow.
 enum Block<'a> {
     Html(&'a str),
-    Figure,
+    /// A simulation figure; the optional string names a hardcoded scenario.
+    Figure(&'a str),
     Tradeoff,
     Recap,
 }
 
 /// Split a body into prose chunks interleaved with `:::name` widget markers.
 /// Blank prose chunks (e.g. between two adjacent markers) are dropped, so the
-/// prose slices borrow directly from `body`.
+/// prose slices borrow directly from `body`. A `:::figure` marker may carry a
+/// trailing scenario name (`:::figure one-to-one-success`).
 fn split_blocks(body: &str) -> Vec<Block<'_>> {
     let mut blocks = Vec::new();
     let mut chunk_start = 0;
     let mut offset = 0;
     for line in body.split_inclusive('\n') {
-        let marker = match line.trim() {
-            ":::figure" => Some(Block::Figure),
-            ":::tradeoff" => Some(Block::Tradeoff),
-            ":::recap" => Some(Block::Recap),
-            _ => None,
+        let trimmed = line.trim();
+        let marker = if let Some(rest) = trimmed.strip_prefix(":::figure") {
+            Some(Block::Figure(rest.trim()))
+        } else {
+            match trimmed {
+                ":::tradeoff" => Some(Block::Tradeoff),
+                ":::recap" => Some(Block::Recap),
+                _ => None,
+            }
         };
         if let Some(m) = marker {
             let chunk = &body[chunk_start..offset];

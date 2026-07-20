@@ -11,14 +11,12 @@ pub struct Section {
     pub id: &'static str,
     /// `"intro"` (plain `Section`) or `"algo"` (numbered `AlgoSection`).
     pub kind: &'static str,
-    /// Ordinal (`"01"`–`"04"`); empty for the intro.
+    /// Ordinal (`"01"`–`"06"`); empty for the intro.
     pub step: &'static str,
     /// Small-caps pattern tag (`"one-to-one"` … `"all-to-all"`); empty for intro.
     pub pattern: &'static str,
     /// Section heading.
     pub title: &'static str,
-    /// Caption for the section's `SimFigure`; empty if it has none.
-    pub figure_caption: &'static str,
     /// The `(pro, con)` pair for the section's `Tradeoff`, if any.
     pub tradeoff: Option<(&'static str, &'static str)>,
     /// Lead-in paragraph (HTML) preceding the recap table; empty if none.
@@ -44,8 +42,9 @@ pub struct RecapRow {
 pub enum Block {
     /// Pre-rendered markdown prose, injected via `dangerous_inner_html`.
     Html(&'static str),
-    /// The `SimFigure` (uses `Section::figure_caption`).
-    Figure,
+    /// A simulation canvas. The string names a hardcoded scenario (see
+    /// `crate::scenarios`); empty renders the plain placeholder.
+    Figure(&'static str),
     /// The `Tradeoff` pro/con pair (uses `Section::tradeoff`).
     Tradeoff,
     /// The recap lead-in + table (uses `Section::recap_lead` / `recap`).

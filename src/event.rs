@@ -26,19 +26,23 @@ pub enum MsgKind {
     RenewReply,
     /// Grantor -> grantee: proactively deactivate the lease.
     Revoke,
+    /// Grantee -> grantor: acknowledge a `Revoke` (the held lease is now dropped).
+    RevokeReply,
     /// Leader -> every other node: a write request to be served (disruptive
     /// path: recipients suspend the read leases they hold before replying).
     Write,
-    /// Node -> leader: acknowledge a `Write` (its held reads are now suspended).
+    /// Node -> leader: acknowledge a `Write` (disruptive path: its held reads are
+    /// now suspended).
     WriteReply,
-    /// Leader -> every other node: the write committed; suspended read leases
-    /// may resume (re-activate on the next renew).
+    /// Leader -> every other node: the write committed; the write tore the read
+    /// leases down, so on commit each grantor re-opens a fresh guard round (see
+    /// `thaw_and_reguard`), after which renews resume.
     Commit,
 }
 
 impl MsgKind {
     /// Number of distinct message kinds — the length of a per-kind array.
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
 
     /// Stable array index for this kind (`0..COUNT`), matching declaration order.
     pub fn index(self) -> usize {
@@ -68,6 +72,11 @@ pub enum Command {
     FailNode(NodeId),
     /// Bring a downed node back up.
     RecoverNode(NodeId),
+    /// The leader serves a single write round now (the scripted, one-shot form of
+    /// a `WriteTick`). Disruptive or not per the scenario's `write_disruptive`; a
+    /// disruptive write is skipped if a round is already outstanding. Lets a demo
+    /// inject one write at a chosen tick without arming a periodic cadence.
+    Write,
 }
 
 /// Logical lease status from a single party's viewpoint.
@@ -83,8 +92,9 @@ pub enum LeaseStatus {
     Expired,
 }
 
-/// A timestamped event in global simulation time. This is the stream consumed
-/// by both the live animation and the GIF generator.
+/// A timestamped event in global simulation time — the stream that drives the
+/// live web animation (and a planned native GIF renderer; see
+/// `docs/design/simulator.md`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Event {
     /// Global time at which the event occurs.

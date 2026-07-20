@@ -6,6 +6,7 @@
 //! `docs/design/simulator.md` and the algorithms in `docs/design/algorithm.md`.
 
 pub mod clock;
+pub mod demos;
 pub mod dist;
 pub mod engine;
 pub mod event;

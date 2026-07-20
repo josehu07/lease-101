@@ -12,7 +12,7 @@
 //! engine logic, and lives in the consumer. See `docs/design/algorithm.md`.
 
 use core::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeSet, BinaryHeap};
 
 use crate::clock::Time;
 use crate::dist::Dist;
@@ -24,29 +24,23 @@ use crate::scenario::{LeaseParams, Scenario};
 /// Per-step probabilities in the scenario are interpreted per poll.
 const POLL_INTERVAL: Time = 50;
 
-/// Grantor-local ticks a guard attempt may go unanswered before the grantor
-/// abandons it. On timeout the lease returns to idle so the grantor's ordinary
-/// per-poll Bernoulli trials re-initiate a fresh guard — this is what lets a
-/// lease still establish when a `Guard`/`GuardReply` is dropped, rather than
-/// hanging in the guard phase forever.
-const GUARD_RETRY_TIMEOUT: Time = 500;
-
 /// Grantor-local ticks an `Active` lease may go without any `RenewReply` (nor
-/// the activating `GuardReply`) before the grantor gives up renewing it. When
-/// every `Renew` is dropped the grantor hears nothing back, yet each send
-/// re-extends its safe expiry `D'`, so without this it would renew into the
-/// void forever. On timeout the grantor stops renewing (`intended = false`) and
-/// lets `D'` lapse naturally; once expired the lease is idle again and the
-/// per-poll Bernoulli trials re-initiate a fresh guard, just as at the start.
-/// Sized around one lease lifetime — long enough to ride out transient renew
-/// loss, short enough to abandon a grantee that has gone silent.
+/// the activating `GuardReply`) before the grantor gives up renewing it. The
+/// grantor keeps at most one renew in flight (`awaiting_reply`), so once a reply
+/// is lost it stops sending further renews and simply waits; this timeout, from
+/// the last confirmation (`last_reply`), is when it concludes the grantee is
+/// unreachable, stops intending the lease (`intended = false`), and lets `D'`
+/// lapse. Once expired the lease is idle again and the per-poll Bernoulli trials
+/// re-initiate a fresh guard, just as at the start. Sized around one lease
+/// lifetime — long enough to ride out a brief silence, short enough to abandon a
+/// grantee that has gone quiet.
 const RENEW_REPLY_TIMEOUT: Time = 1500;
 
 /// Global ticks a disruptive write round may stay outstanding before the leader
 /// gives up on it (a `Write` or `WriteReply` was lost, so the reply set never
 /// reached the commit condition). On abort, everyone unfreezes so their
-/// suspended read leases re-activate, and the cluster recovers rather than
-/// hanging frozen forever.
+/// torn-down leases can re-establish (re-guard), and the cluster recovers rather
+/// than hanging frozen forever.
 const WRITE_ROUND_TIMEOUT: Time = 1500;
 
 /// An item scheduled on the engine's internal timeline.
@@ -108,24 +102,37 @@ impl PartialOrd for Timed {
 #[derive(Debug, Clone, Copy)]
 struct GrantorState {
     status: LeaseStatus,
-    /// Grantor-local time until which the promise is held (`D'`). Safety-padded
-    /// well past one lease span (see [`Engine::send_renew`]), so it is *not*
-    /// suitable for the countdown bar — [`display_expiry`](Self::display_expiry)
-    /// is.
+    /// Grantor-local time until which the promise is held (`D'`) — the single
+    /// safe-expiry bound, and what the countdown bar shows. Maintained by the
+    /// extend-on-send / shorten-on-reply rule: each `Renew` sent *extends* it to
+    /// the pessimistic no-reply bound (`Engine::send_renew`, a `max`), and each
+    /// `RenewReply` received *shortens* it to the tighter confirmed-receipt bound
+    /// (`Engine::on_renew_reply`, a `min`). So while replies flow it stays a bit
+    /// over one lease span ahead (the bar reads full); once they stop it drains
+    /// to the last pessimistic bound and the lease expires there.
     grant_expiry: Time,
-    /// Grantor-local expiry used only to render the countdown bar: the last
-    /// reachability proof (activating `GuardReply`, then each `RenewReply`) plus
-    /// one `t_lease`, mirroring the grantee's `hold_expiry`. Unlike the padded
-    /// safety bound `grant_expiry`, this starts a fresh promise at a full bar and
-    /// drains cleanly, refilling on each reply.
-    display_expiry: Time,
     /// Grantor-local time the next renew is due to be sent.
     next_renew_due: Time,
     /// Whether the grantor currently intends this lease to be active.
     intended: bool,
+    /// Set when a *disruptive write* tore this grant down (in `suspend_reads`),
+    /// while the grantor is frozen. On the `Commit` (or abort) that thaws the
+    /// grantor, it deterministically re-opens the guard — so re-establishment is
+    /// commit-driven, not left to a stochastic re-initiation. Cleared once the
+    /// re-guard fires (or on any fresh guard). A write-torn-down lease is thus
+    /// distinguished from a deliberate `Revoke` (which does not re-guard).
+    reguard_on_thaw: bool,
+    /// Whether a `Renew` is outstanding with no `RenewReply` yet. The grantor
+    /// keeps at most one renew in flight: it won't send the next until the
+    /// previous is acked (set on send, cleared on reply / activation), so a lost
+    /// reply stops the renew stream rather than firing more un-acked renews. The
+    /// lease then lapses via `expire_stale_renews` / `D'` (see those).
+    awaiting_reply: bool,
     /// Grantor-local time the current guard attempt was opened, while status is
     /// `Guarding` and no reply has arrived. Used to time out an unanswered guard
-    /// (a dropped `Guard`/`GuardReply`) after [`GUARD_RETRY_TIMEOUT`].
+    /// (a dropped `Guard`/`GuardReply`) after a full guard window `t_guard -
+    /// t_delta` — see [`Engine::expire_stale_guards`] — and to render the guard
+    /// countdown bar.
     guard_since: Time,
     /// Grantor-local time of the most recent confirmation the grantee is still
     /// reachable — the activating `GuardReply`, then each `RenewReply`. If an
@@ -159,11 +166,11 @@ struct LeaseState {
 #[derive(Debug, Clone)]
 struct NodeState {
     up: bool,
-    /// While `true`, the node has suspended the read leases it *holds as a
-    /// grantee* for an in-progress *disruptive* write: it dropped them on the
-    /// `Write` and will ignore renews (so they cannot re-activate) until a
-    /// `Commit` (or a safety timeout) clears the flag. This is what makes the
-    /// disruptive write's re-establishment genuinely commit-driven.
+    /// While `true`, the node has torn down the leases it takes part in for an
+    /// in-progress *disruptive* write (see [`Engine::suspend_reads`]): it ignores
+    /// renews (as grantee) and won't re-guard (as grantor) until a `Commit` (or a
+    /// safety timeout) clears the flag. This is what makes the disruptive write's
+    /// re-establishment genuinely commit-driven.
     write_frozen: bool,
 }
 
@@ -176,7 +183,7 @@ struct WriteRound {
     /// Global time the write broadcast went out (for a stuck-round timeout).
     started: Time,
     /// Peers that have replied so far (the leader counts itself implicitly).
-    replied: std::collections::BTreeSet<NodeId>,
+    replied: BTreeSet<NodeId>,
     /// Whether the write has already committed (so a late reply is a no-op).
     committed: bool,
 }
@@ -234,9 +241,10 @@ impl Engine {
                 grantor: GrantorState {
                     status: LeaseStatus::Inactive,
                     grant_expiry: 0,
-                    display_expiry: 0,
                     next_renew_due: 0,
                     intended: false,
+                    reguard_on_thaw: false,
+                    awaiting_reply: false,
                     guard_since: 0,
                     last_reply: 0,
                 },
@@ -357,21 +365,62 @@ impl Engine {
             })
             .collect();
 
+        let p = self.params();
         let leases = self
             .leases
             .iter()
-            .map(|l| LeaseBar {
-                grantor: l.id.grantor,
-                grantee: l.id.grantee,
-                grantor_status: l.grantor.status,
-                grantee_status: l.grantee.status,
-                grantor_fill: self.fill(
-                    l.id.grantor,
-                    l.grantor.status,
-                    l.grantor.display_expiry,
-                    t,
-                ),
-                grantee_fill: self.fill(l.id.grantee, l.grantee.status, l.grantee.hold_expiry, t),
+            .map(|l| {
+                // Each party's countdown bar reads its real expiry — the grantee's
+                // `hold_expiry` (`C'`) and the grantor's `grant_expiry` (`D'`), the
+                // very bound that flips it to `Expired` — so a bar reaching empty
+                // coincides with that side expiring. Each is normalized by the span
+                // that bound is set a whole *away* from, so the fill hits 1.0 only
+                // right when it's (re)armed and then drains continuously toward 0:
+                // the grantee's `C'` is `t_lease - t_delta` from receipt; the
+                // grantor's `D'` is the full provisioned grant span `t_guard +
+                // t_lease + 2·t_delta` from its send (see `send_renew`). Using the
+                // over-provisioned `D'` with only a `t_lease` span would peg the bar
+                // full until `local` came within a span of `D'`, so the bar must
+                // normalize by the same span `D'` is provisioned over.
+                //
+                // Guarding drains over the guard phase's length `t_guard - t_delta`
+                // on *both* sides, so the two guard bars read identically: the
+                // grantee's is its acceptance window `A'` (`guard_deadline`), the
+                // grantor's runs from `guard_since` over the same span — also exactly
+                // when it gives up an unanswered guard (`expire_stale_guards`), so
+                // that bar empties as the grantor falls idle. Any other status has
+                // no live countdown.
+                let guard_span = p.guard_window();
+                let grant_span = p.grant_span();
+                let grantor_fill = match l.grantor.status {
+                    LeaseStatus::Active => {
+                        self.fill(l.id.grantor, l.grantor.grant_expiry, grant_span, t)
+                    }
+                    LeaseStatus::Guarding => self.fill(
+                        l.id.grantor,
+                        l.grantor.guard_since + guard_span,
+                        guard_span,
+                        t,
+                    ),
+                    _ => 0.0,
+                };
+                let grantee_fill = match l.grantee.status {
+                    LeaseStatus::Active => {
+                        self.fill(l.id.grantee, l.grantee.hold_expiry, p.t_lease, t)
+                    }
+                    LeaseStatus::Guarding => {
+                        self.fill(l.id.grantee, l.grantee.guard_deadline, guard_span, t)
+                    }
+                    _ => 0.0,
+                };
+                LeaseBar {
+                    grantor: l.id.grantor,
+                    grantee: l.id.grantee,
+                    grantor_status: l.grantor.status,
+                    grantee_status: l.grantee.status,
+                    grantor_fill,
+                    grantee_fill,
+                }
             })
             .collect();
 
@@ -383,19 +432,20 @@ impl Engine {
         }
     }
 
-    /// Fraction of lease life remaining for one party at global time `t`, as a
-    /// value in `0.0..1.0`. Zero unless the party considers the lease active.
-    /// `expiry_local` is the party's display expiry — `hold_expiry` for a
-    /// grantee, `display_expiry` for a grantor — both one `t_lease` span from
-    /// their last proof, so the fill spans the full bar and drains cleanly.
-    fn fill(&self, node: NodeId, status: LeaseStatus, expiry_local: Time, t: Time) -> f64 {
-        if status != LeaseStatus::Active {
+    /// Fraction of a countdown remaining for one party at global time `t`, as a
+    /// value in `0.0..1.0`. `expiry_local` is the party-local tick the countdown
+    /// reaches empty at (its real expiry — no separate display timer), and `span`
+    /// the full length it drains over: the caller passes the span that expiry is
+    /// (re)armed a whole away from, so the bar fills to 1 at arm and drains cleanly
+    /// (grantee active `t_lease`; grantor active the full grant span; either guard
+    /// bar the guard window — see the call sites in `frame_at`).
+    fn fill(&self, node: NodeId, expiry_local: Time, span: Time, t: Time) -> f64 {
+        if span <= 0 {
             return 0.0;
         }
         let local = self.scenario.nodes[node].clock.local(t);
         let remaining = (expiry_local - local) as f64;
-        let span = self.params().t_lease as f64;
-        (remaining / span).clamp(0.0, 1.0)
+        (remaining / span as f64).clamp(0.0, 1.0)
     }
 
     fn params(&self) -> LeaseParams {
@@ -445,7 +495,13 @@ impl Engine {
         // A message is lost to a partition, or to either the link's own drop
         // chance or this kind's — combined into one independent probability
         // `1 - (1-a)(1-b)` so a single RNG draw keeps determinism footprint low.
-        let kind_drop = self.scenario.kind_drop[kind.index()];
+        // A kind's drop only applies from its `kind_drop_from` tick onward, so a
+        // scenario can establish cleanly and then begin losing a kind.
+        let kind_drop = if sent >= self.scenario.kind_drop_from[kind.index()] {
+            self.scenario.kind_drop[kind.index()]
+        } else {
+            0.0
+        };
         let drop_chance = 1.0 - (1.0 - link.drop_chance) * (1.0 - kind_drop);
         let dropped = link.partitioned || self.rng.chance(drop_chance);
         let delay = link.delay.sample(&mut self.rng).max(1);
@@ -550,6 +606,7 @@ impl Engine {
                     self.recover_node(node);
                 }
             }
+            Command::Write => self.serve_write(),
         }
     }
 
@@ -616,20 +673,25 @@ impl Engine {
         }
     }
 
-    /// Abandon any guard attempt this node opened that has gone unanswered for
-    /// [`GUARD_RETRY_TIMEOUT`] grantor-local ticks — the sign that its `Guard`
-    /// or the `GuardReply` was dropped. The lease returns to `Inactive` (its
-    /// pre-guard idle state), so `maybe_initiate`'s per-poll Bernoulli trials
-    /// will re-initiate a fresh guard after a random wait, just as at the start.
+    /// Abandon any guard attempt this node opened that has gone unanswered for a
+    /// whole guard phase — the sign that its `Guard` or the `GuardReply` was
+    /// dropped. The give-up span is the guard window `t_guard - t_delta`, the same
+    /// length as the grantee's acceptance window `A'`: the grantor holds the guard
+    /// for as long as the grantee would still accept the activating first renew,
+    /// and only once that has lapsed does it fall back to `Inactive` (its pre-guard
+    /// idle state). Re-initiation ("retry") is then the ordinary per-poll
+    /// `initiate_chance` path, which starts fresh *from* that idle state — so a
+    /// retry is a full guard phase away, not a fraction of one.
     ///
     /// Only stuck guard phases are timed out; once a lease is `Active` a lost
     /// renew is already handled by the ordinary renew loop, so those are left be.
     fn expire_stale_guards(&mut self, node: NodeId) {
         let local = self.local(node);
+        let guard_window = self.params().guard_window();
         for i in 0..self.leases.len() {
             if self.leases[i].id.grantor == node
                 && self.leases[i].grantor.status == LeaseStatus::Guarding
-                && local - self.leases[i].grantor.guard_since >= GUARD_RETRY_TIMEOUT
+                && local - self.leases[i].grantor.guard_since >= guard_window
             {
                 self.leases[i].grantor.status = LeaseStatus::Inactive;
                 self.leases[i].grantor.intended = false;
@@ -639,10 +701,12 @@ impl Engine {
 
     /// Give up renewing an `Active` lease whose grantee has gone silent for
     /// [`RENEW_REPLY_TIMEOUT`] grantor-local ticks — no `RenewReply` since the
-    /// last confirmation, the sign every `Renew` (or its reply) is being
-    /// dropped. Without this the grantor renews forever: each `send_renew`
-    /// re-extends `D'` past `now`, so the lease never lapses on its own and the
-    /// grantor never falls idle to re-guard.
+    /// last confirmation, the sign the `Renew` (or its reply) was dropped. With
+    /// one renew in flight the grantor has already stopped sending renews (it's
+    /// `awaiting_reply`); this is when it concludes the grantee is unreachable and
+    /// stops *intending* the lease, so `D'` can lapse and the grantor fall idle to
+    /// re-guard (without it, an `awaiting_reply` lease would keep its last `D'` and
+    /// intent forever, never re-guarding).
     ///
     /// This only stops the renewing (`intended = false`, like a passive revoke);
     /// the grantor keeps its outstanding `D'` and lets it lapse naturally, so the
@@ -663,10 +727,15 @@ impl Engine {
         }
     }
 
-    /// A node may spontaneously start a lease it grants but has not activated.
-    /// A disruptive write suspends only the reads a node *holds*, never the
-    /// grants it *makes*, so granting continues throughout a write round.
+    /// A node may spontaneously start a lease it grants but has not activated
+    /// (the stochastic `initiate_chance` path, e.g. the playground's staggered
+    /// establishment). A node frozen for an in-progress disruptive write does not
+    /// initiate — its torn-down grants are re-guarded deterministically on the
+    /// `Commit` that thaws it (see `thaw_and_reguard`), not by this chance path.
     fn maybe_initiate(&mut self, node: NodeId) {
+        if self.nodes[node].write_frozen {
+            return;
+        }
         let p = self.scenario.nodes[node].initiate_chance;
         for i in 0..self.leases.len() {
             if self.leases[i].id.grantor == node && self.grantor_idle(i) && self.rng.chance(p) {
@@ -680,26 +749,37 @@ impl Engine {
         let LeaseId { grantor, grantee } = self.leases[i].id;
         self.leases[i].grantor.status = LeaseStatus::Guarding;
         self.leases[i].grantor.intended = true;
+        // Fresh guard phase: no renew is outstanding yet, and any pending
+        // re-guard-on-thaw request is now satisfied.
+        self.leases[i].grantor.awaiting_reply = false;
+        self.leases[i].grantor.reguard_on_thaw = false;
         self.leases[i].grantor.guard_since = self.local(grantor);
         self.send(grantor, grantee, MsgKind::Guard, i);
     }
 
-    /// Proactively revoke a lease: stop renewing and notify the grantee. The
-    /// grantor keeps its own outstanding `D'` and lets it lapse naturally, so
-    /// the safety invariant holds regardless of whether the grantee is reached.
+    /// Proactively revoke a lease: stop renewing and notify the grantee. If the
+    /// grantee's `RevokeReply` comes back the grantor exits granting at once (see
+    /// `on_revoke_reply`); otherwise it keeps its outstanding `D'` and lets it
+    /// lapse naturally — so the safety invariant holds regardless of whether the
+    /// grantee is reached.
     fn begin_revoke(&mut self, i: usize) {
         let LeaseId { grantor, grantee } = self.leases[i].id;
         self.leases[i].grantor.intended = false;
         self.send(grantor, grantee, MsgKind::Revoke, i);
     }
 
-    /// Send due renews for leases this node grants and currently intends.
+    /// Send due renews for leases this node grants and currently intends. The
+    /// grantor keeps at most one renew in flight: a lease still `awaiting_reply`
+    /// to its last renew is skipped, so the next renew waits for that ack (or for
+    /// `expire_stale_renews` to give up) rather than firing un-acked renews.
     fn service_grants(&mut self, node: NodeId) {
         for i in 0..self.leases.len() {
             if self.leases[i].id.grantor != node || !self.leases[i].grantor.intended {
                 continue;
             }
-            if self.leases[i].grantor.status != LeaseStatus::Active {
+            if self.leases[i].grantor.status != LeaseStatus::Active
+                || self.leases[i].grantor.awaiting_reply
+            {
                 continue;
             }
             let local = self.local(node);
@@ -720,9 +800,11 @@ impl Engine {
         let LeaseId { grantor, grantee } = self.leases[i].id;
         let p = self.params();
         let b = self.local(grantor);
-        let provisional = b + p.t_guard + p.t_delta + p.t_lease + p.t_delta;
+        let provisional = b + p.grant_span();
         self.leases[i].grantor.grant_expiry = self.leases[i].grantor.grant_expiry.max(provisional);
         self.leases[i].grantor.next_renew_due = b + p.renew_interval;
+        // One renew in flight: block further renews until this one is acked.
+        self.leases[i].grantor.awaiting_reply = true;
         self.send(grantor, grantee, MsgKind::Renew, i);
     }
 
@@ -744,6 +826,7 @@ impl Engine {
             MsgKind::Renew => self.on_renew(lease_idx),
             MsgKind::RenewReply => self.on_renew_reply(lease_idx),
             MsgKind::Revoke => self.on_revoke(lease_idx),
+            MsgKind::RevokeReply => self.on_revoke_reply(lease_idx),
             // Write-path messages are cluster-wide, not lease-scoped: the
             // `lease_idx` slot carries the write id instead.
             MsgKind::Write => self.on_write(from, to, lease_idx as u64),
@@ -757,7 +840,7 @@ impl Engine {
         let LeaseId { grantor, grantee } = self.leases[i].id;
         let p = self.params();
         let a = self.local(grantee);
-        self.leases[i].grantee.guard_deadline = a + p.t_guard - p.t_delta;
+        self.leases[i].grantee.guard_deadline = a + p.guard_window();
         self.leases[i].grantee.status = LeaseStatus::Guarding;
         self.emit(
             self.now,
@@ -776,12 +859,11 @@ impl Engine {
         }
         self.leases[i].grantor.status = LeaseStatus::Active;
         // Activation is the first proof the grantee is reachable; arm the
-        // renew-reply liveness clock from here, and start the display countdown
-        // at a full lease span from this proof (mirrors the grantee's hold).
+        // renew-reply liveness clock from here. `grant_expiry` (`D'`) is then set
+        // by the first `send_renew` below.
         let d = self.local(self.leases[i].id.grantor);
         self.leases[i].grantor.last_reply = d;
         self.leases[i].grantor.next_renew_due = d;
-        self.leases[i].grantor.display_expiry = d + self.params().t_lease;
         self.emit(
             self.now,
             EventKind::GrantorLease {
@@ -841,17 +923,19 @@ impl Engine {
         let p = self.params();
         let d = self.local(self.leases[i].id.grantor);
         let tightened = d + p.t_lease + p.t_delta;
-        // Only ever reduce toward the tighter bound; never below the grantee's
-        // possible expiry, which `tightened` already dominates.
+        // Shorten `D'` toward the tighter, confirmed-receipt bound (never below the
+        // grantee's possible expiry, which `tightened` already dominates). This is
+        // what refills the countdown bar — the bar reads `grant_expiry` directly,
+        // so tightening on a fresh reply lifts it back up.
         self.leases[i].grantor.grant_expiry = self.leases[i].grantor.grant_expiry.min(tightened);
-        // A reply proves the grantee is still reachable; refresh the liveness
-        // clock so `expire_stale_renews` only fires on a genuinely silent link,
-        // and refill the display countdown one lease span past this fresh proof.
+        // A reply proves the grantee is still reachable; refresh the liveness clock
+        // so `expire_stale_renews` only fires on a genuinely silent link.
         self.leases[i].grantor.last_reply = d;
-        self.leases[i].grantor.display_expiry = d + p.t_lease;
+        // This renew is now acked, so the next one may be sent when due.
+        self.leases[i].grantor.awaiting_reply = false;
     }
 
-    /// Grantee receives `Revoke`: drop the lease immediately.
+    /// Grantee receives `Revoke`: drop the lease immediately and acknowledge.
     fn on_revoke(&mut self, i: usize) {
         if self.leases[i].grantee.status == LeaseStatus::Active
             || self.leases[i].grantee.status == LeaseStatus::Guarding
@@ -866,6 +950,35 @@ impl Engine {
                 },
             );
         }
+        // Acknowledge the revoke back to the grantor. The grantor already stopped
+        // renewing when it revoked; the ack lets it leave the granting state
+        // *promptly* (see `on_revoke_reply`) instead of waiting out `D'`. Never
+        // required for safety — if the ack is lost the grantor just lets `D'`
+        // lapse — so it is safe whether or not the grantee is reached.
+        let LeaseId { grantor, grantee } = self.leases[i].id;
+        self.reply_after_delay(grantee, grantor, MsgKind::RevokeReply, i);
+    }
+
+    /// Grantor receives `RevokeReply`: the grantee confirmed it dropped the lease,
+    /// so the grantor can leave the granting state at once rather than waiting for
+    /// its padded `D'` to lapse. Safe because the ack is a round-trip *after* the
+    /// grantee expired its hold, so the grantee's expiry already precedes now — the
+    /// invariant `grantor expiry >= grantee expiry` still holds. (Without the ack,
+    /// the grantor would simply let `D'` lapse; this just ends it promptly once the
+    /// revoke is confirmed.)
+    fn on_revoke_reply(&mut self, i: usize) {
+        if !self.grantor_active_or_guarding(i) {
+            return;
+        }
+        self.leases[i].grantor.status = LeaseStatus::Expired;
+        self.leases[i].grantor.intended = false;
+        self.emit(
+            self.now,
+            EventKind::GrantorLease {
+                lease: self.leases[i].id,
+                status: LeaseStatus::Expired,
+            },
+        );
     }
 
     // ---- Expiry detection -------------------------------------------------
@@ -873,50 +986,51 @@ impl Engine {
     /// Recompute lease statuses for both roles `node` plays, emitting expiry
     /// transitions when a local clock has passed the relevant deadline.
     fn recompute_statuses(&mut self, node: NodeId) {
+        let local = self.local(node);
         for i in 0..self.leases.len() {
             let id = self.leases[i].id;
-            if id.grantor == node && self.leases[i].grantor.status == LeaseStatus::Active {
-                let local = self.local(node);
-                if local > self.leases[i].grantor.grant_expiry {
-                    self.leases[i].grantor.status = LeaseStatus::Expired;
-                    self.emit(
-                        self.now,
-                        EventKind::GrantorLease {
-                            lease: id,
-                            status: LeaseStatus::Expired,
-                        },
-                    );
-                }
+            if id.grantor == node
+                && self.leases[i].grantor.status == LeaseStatus::Active
+                && local > self.leases[i].grantor.grant_expiry
+            {
+                self.leases[i].grantor.status = LeaseStatus::Expired;
+                self.emit(
+                    self.now,
+                    EventKind::GrantorLease {
+                        lease: id,
+                        status: LeaseStatus::Expired,
+                    },
+                );
             }
-            if id.grantee == node && self.leases[i].grantee.status == LeaseStatus::Active {
-                let local = self.local(node);
-                if local > self.leases[i].grantee.hold_expiry {
-                    self.leases[i].grantee.status = LeaseStatus::Expired;
-                    self.emit(
-                        self.now,
-                        EventKind::GranteeLease {
-                            lease: id,
-                            status: LeaseStatus::Expired,
-                        },
-                    );
-                }
+            if id.grantee == node
+                && self.leases[i].grantee.status == LeaseStatus::Active
+                && local > self.leases[i].grantee.hold_expiry
+            {
+                self.leases[i].grantee.status = LeaseStatus::Expired;
+                self.emit(
+                    self.now,
+                    EventKind::GranteeLease {
+                        lease: id,
+                        status: LeaseStatus::Expired,
+                    },
+                );
             }
             // A grantee whose guard window (`A'`) lapses without an activating
             // first `Renew` — because that `Renew` was dropped or delayed — gives
             // up the guard instead of hanging in `Guarding` forever. This mirrors
             // the grantor-side `expire_stale_guards` timeout on the other end.
-            if id.grantee == node && self.leases[i].grantee.status == LeaseStatus::Guarding {
-                let local = self.local(node);
-                if local > self.leases[i].grantee.guard_deadline {
-                    self.leases[i].grantee.status = LeaseStatus::Expired;
-                    self.emit(
-                        self.now,
-                        EventKind::GranteeLease {
-                            lease: id,
-                            status: LeaseStatus::Expired,
-                        },
-                    );
-                }
+            if id.grantee == node
+                && self.leases[i].grantee.status == LeaseStatus::Guarding
+                && local > self.leases[i].grantee.guard_deadline
+            {
+                self.leases[i].grantee.status = LeaseStatus::Expired;
+                self.emit(
+                    self.now,
+                    EventKind::GranteeLease {
+                        lease: id,
+                        status: LeaseStatus::Expired,
+                    },
+                );
             }
         }
     }
@@ -924,9 +1038,9 @@ impl Engine {
     // ---- Write path ------------------------------------------------------
     //
     // Two flavors, both broadcast by the leader (smallest-id grantee):
-    //  * disruptive — a recipient drops the read leases it *holds as a grantee*
-    //    and freezes them (renews can't re-activate) until the `Commit`; grantors
-    //    keep renewing throughout, so reads simply resume once unfrozen. The
+    //  * disruptive — a recipient tears down every lease it takes part in (the
+    //    reads it holds *and* the grants it makes) and freezes until the `Commit`;
+    //    once unfrozen the lease re-establishes from scratch, re-guarding. The
     //    `Write` itself is the revocation notice — no separate `Revoke` traffic.
     //  * non-disruptive — recipients keep their leases running entirely
     //    untouched; the write's `Write`/`WriteReply`/`Commit` messages sweep the
@@ -949,7 +1063,7 @@ impl Engine {
     }
 
     /// The set of grantee (local-reader) nodes — every distinct lease grantee.
-    fn grantee_nodes(&self) -> std::collections::BTreeSet<NodeId> {
+    fn grantee_nodes(&self) -> BTreeSet<NodeId> {
         self.leases.iter().map(|l| l.id.grantee).collect()
     }
 
@@ -964,6 +1078,13 @@ impl Engine {
                 self.schedule(next, Scheduled::WriteTick);
             }
         }
+        self.serve_write();
+    }
+
+    /// Have the leader open one write round now (shared by the periodic `WriteTick`
+    /// and the scripted `Command::Write`): only if there is a leader that is up,
+    /// and — for disruptive writes — only one round at a time.
+    fn serve_write(&mut self) {
         let Some(leader) = self.leader() else {
             return;
         };
@@ -990,7 +1111,7 @@ impl Engine {
         self.write_rounds.push(WriteRound {
             id,
             started: self.now,
-            replied: std::collections::BTreeSet::new(),
+            replied: BTreeSet::new(),
             committed: false,
         });
         if self.scenario.write_disruptive {
@@ -1030,7 +1151,7 @@ impl Engine {
     /// Commit round `write_id` once its reply set (leader implicitly included)
     /// both reaches a majority and covers every grantee node. On commit the
     /// leader emits `WriteCommitted`, broadcasts `Commit`, and — disruptive only —
-    /// unfreezes itself so its suspended read leases can re-activate.
+    /// unfreezes itself so its torn-down leases can re-establish (re-guard).
     fn try_commit(&mut self, write_id: u64) {
         let Some(leader) = self.leader() else {
             return;
@@ -1059,17 +1180,32 @@ impl Engine {
             }
         }
         if self.scenario.write_disruptive {
-            self.nodes[leader].write_frozen = false;
+            // The leader commits locally, so it thaws and re-guards its own
+            // torn-down grants here (the same recovery peers do on `Commit`).
+            self.thaw_and_reguard(leader);
         }
         self.write_rounds.retain(|r| r.id != write_id);
     }
 
-    /// A node receives a `Commit`. Disruptive: unfreeze, so its suspended read
-    /// leases re-activate on the next renew. Non-disruptive: a no-op — leases were
-    /// never touched.
+    /// A node receives a `Commit`. Disruptive: thaw the node and immediately
+    /// re-establish the grants the write tore down (see `thaw_and_reguard`).
+    /// Non-disruptive: a no-op — leases were never touched.
     fn on_commit(&mut self, node: NodeId, _write_id: u64) {
         if self.scenario.write_disruptive {
-            self.nodes[node].write_frozen = false;
+            self.thaw_and_reguard(node);
+        }
+    }
+
+    /// Thaw `node` after a disruptive write and deterministically re-open a fresh
+    /// guard for every grant the write tore down (`reguard_on_thaw`). This is what
+    /// makes recovery *commit-driven*: the moment a grantor learns the write
+    /// committed, it re-grants — no waiting on a stochastic per-poll re-initiation.
+    fn thaw_and_reguard(&mut self, node: NodeId) {
+        self.nodes[node].write_frozen = false;
+        for i in 0..self.leases.len() {
+            if self.leases[i].id.grantor == node && self.leases[i].grantor.reguard_on_thaw {
+                self.begin_guard(i); // clears `reguard_on_thaw`
+            }
         }
     }
 
@@ -1091,36 +1227,71 @@ impl Engine {
         }
         self.write_rounds
             .retain(|r| now - r.started < WRITE_ROUND_TIMEOUT);
-        // Disruptive writes freeze nodes; thaw every one so their suspended read
-        // leases re-activate. Non-disruptive writes touch no node state, so
-        // dropping the stale round is all the cleanup needed.
+        // Disruptive writes freeze nodes; thaw every one and re-guard its
+        // torn-down grants, exactly as a commit would — so an aborted round still
+        // recovers deterministically. Non-disruptive writes touch no node state,
+        // so dropping the stale round is all the cleanup needed.
         if self.scenario.write_disruptive {
             for id in 0..self.nodes.len() {
-                self.nodes[id].write_frozen = false;
+                self.thaw_and_reguard(id);
             }
         }
     }
 
-    /// Suspend the read leases `node` holds *as a grantee* for a disruptive
-    /// write: drop each active/guarding hold to `Expired` and set `write_frozen`
-    /// so incoming renews are ignored until the `Commit` (or a timeout) thaws it.
-    /// The grantors keep renewing throughout, so once unfrozen the very next
-    /// renew re-activates the hold — no re-guarding, no `Revoke` traffic.
+    /// Suspend, for a disruptive write, every lease `node` takes part in — the
+    /// write *is* the revocation, so a torn-down lease must be re-established from
+    /// scratch, **paying the guard round-trips again** (per `algorithm.md`, "Write
+    /// disrupts local reads → Lease teardown"). Called on each node as it learns of
+    /// the write (the leader in `begin_write`, every peer in `on_write`), so both
+    /// endpoints of each lease get torn down as their nodes are notified.
+    ///
+    /// - As **grantee** (a read it holds): drop each active/guarding hold to
+    ///   `Expired`; `write_frozen` (set here) then makes it ignore renews until the
+    ///   `Commit` (or a timeout) thaws it.
+    /// - As **grantor** (a grant it makes): reset each active/guarding grant to
+    ///   `Inactive`, stop renewing, and mark it `reguard_on_thaw` so the `Commit`
+    ///   re-opens a fresh **guard** deterministically (see `thaw_and_reguard`) —
+    ///   rather than a bare renew silently re-activating a still-`Active` grant with
+    ///   no guard phase. It keeps its outstanding `D'` and simply stops extending it
+    ///   (safe to drop idle).
     fn suspend_reads(&mut self, node: NodeId) {
         self.nodes[node].write_frozen = true;
+        let local = self.local(node);
         for i in 0..self.leases.len() {
-            if self.leases[i].id.grantee != node {
-                continue;
-            }
-            let was = self.leases[i].grantee.status;
-            if matches!(was, LeaseStatus::Active | LeaseStatus::Guarding) {
+            let id = self.leases[i].id;
+            if id.grantee == node
+                && matches!(
+                    self.leases[i].grantee.status,
+                    LeaseStatus::Active | LeaseStatus::Guarding
+                )
+            {
                 self.leases[i].grantee.status = LeaseStatus::Expired;
-                self.leases[i].grantee.hold_expiry = self.local(node);
+                self.leases[i].grantee.hold_expiry = local;
                 self.emit(
                     self.now,
                     EventKind::GranteeLease {
-                        lease: self.leases[i].id,
+                        lease: id,
                         status: LeaseStatus::Expired,
+                    },
+                );
+            }
+            if id.grantor == node
+                && matches!(
+                    self.leases[i].grantor.status,
+                    LeaseStatus::Active | LeaseStatus::Guarding
+                )
+            {
+                self.leases[i].grantor.status = LeaseStatus::Inactive;
+                self.leases[i].grantor.intended = false;
+                // Remember to re-guard this grant once the commit thaws us — the
+                // write tore it down, so recovery is deterministic and commit-
+                // driven (not a stochastic re-initiation).
+                self.leases[i].grantor.reguard_on_thaw = true;
+                self.emit(
+                    self.now,
+                    EventKind::GrantorLease {
+                        lease: id,
+                        status: LeaseStatus::Inactive,
                     },
                 );
             }
@@ -1387,10 +1558,10 @@ mod tests {
     #[test]
     fn stuck_guard_times_out_and_retries() {
         // With every Guard dropped the lease can never come up — but the grantor
-        // must not hang in `Guarding` forever: each attempt times out after
-        // GUARD_RETRY_TIMEOUT and a fresh Guard is (re-)initiated. Over a 10k run
-        // (timeout 500), that means many attempts, not the single Guard a
-        // no-retry grantor would send and then stall on.
+        // must not hang in `Guarding` forever: each attempt times out after a full
+        // guard window (`t_guard - t_delta`) and, once idle, a fresh Guard is
+        // (re-)initiated. Over a 10k run that means several attempts, not the
+        // single Guard a no-retry grantor would send and then stall on.
         let s = basic().kind_drop(MsgKind::Guard, 1.0);
         let mut e = Engine::new(s);
         let events = e.advance_to(10_000);
@@ -1449,6 +1620,36 @@ mod tests {
         for m in &f.messages {
             assert!((0.0..=1.0).contains(&m.progress));
         }
+    }
+
+    #[test]
+    fn guarding_bar_has_a_draining_fill() {
+        // A grantor that opens a guard whose Guard message is always dropped stays
+        // in `Guarding` until its retry window lapses. While guarding, the bar must
+        // show a *draining* countdown (fill in (0, 1]), not a flat 0 — the guard
+        // timer the frontend colors blue. It should also shrink as time passes.
+        let s = scripted().kind_drop(MsgKind::Guard, 1.0);
+        let mut e = Engine::new(s);
+        e.command(Command::Initiate(LeaseId {
+            grantor: 0,
+            grantee: 1,
+        }));
+        // Sample soon after guarding opens, then a little later (both well within
+        // the guard window `t_guard - t_delta`, so the guard is still outstanding).
+        e.advance_to(100);
+        let f0 = e.frame_at(100);
+        assert_eq!(f0.leases[0].grantor_status, LeaseStatus::Guarding);
+        let early = f0.leases[0].grantor_fill;
+        assert!(early > 0.0 && early <= 1.0, "guarding fill was {early}");
+
+        e.advance_to(400);
+        let f1 = e.frame_at(400);
+        assert_eq!(f1.leases[0].grantor_status, LeaseStatus::Guarding);
+        let late = f1.leases[0].grantor_fill;
+        assert!(
+            late < early,
+            "guarding fill should drain: {late} !< {early}"
+        );
     }
 
     #[test]
@@ -1653,12 +1854,12 @@ mod tests {
 
     #[test]
     fn write_disrupts_then_leases_recover() {
-        // A disruptive write drops the leader's held read leases, then they
-        // recover between writes: the grantors keep renewing, so once the commit
-        // unfreezes the leader the next renews re-activate its holds. Sampling
-        // across the run we should see both a low point (a write in progress, the
-        // leader's reads suspended) and a majority high point (recovered) — rather
-        // than snapshotting one fragile final tick.
+        // A disruptive write tears down the leader's held read leases, then they
+        // recover between writes: once the commit unfreezes the cluster the
+        // grantors re-guard and re-establish the leader's holds. Sampling across
+        // the run we should see both a low point (a write in progress, the leader's
+        // reads suspended) and a majority high point (re-established) — rather than
+        // snapshotting one fragile final tick.
         let series = held_series(Engine::new(leader_writes(1200)), 0, 25);
         let lo = series.iter().copied().min().unwrap();
         let hi = series.iter().copied().max().unwrap();
@@ -1709,8 +1910,8 @@ mod tests {
             "no write can commit with every reply dropped"
         );
         // ...yet the leader recovers a majority between aborts: each stuck round
-        // thaws it after the timeout, and the still-flowing renews re-activate its
-        // holds until the next write suspends them again.
+        // thaws the cluster after the timeout, and the grantors re-guard to
+        // re-establish its holds until the next write tears them down again.
         let hi = held_series(Engine::new(s), 0, 25)
             .into_iter()
             .max()
