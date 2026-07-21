@@ -52,6 +52,12 @@ body {
     color: var(--text);
     font-family: var(--font-sans);
     line-height: 1.65;
+    /* Guard against horizontal scroll from decorative absolutely-positioned
+       overflow (the hidden `.pg-tconst`/`.pg-hint` hover tooltips are laid out
+       nowrap and can poke past a narrow viewport's right edge). `clip` — not
+       `hidden` — so no scroll container is created and the sticky nav still
+       pins. A no-op on desktop, where content is centered far from the edge. */
+    overflow-x: clip;
 }
 
 .nav {
@@ -1696,6 +1702,51 @@ body {
     line-height: 0;
 }
 
+/* ---- Responsive: narrow / phone viewports ---------------------------- */
+
+/* Below the content column width the banner's brand + 5-link row no longer
+   fits on one line (it needs ~570px), so the links clip off the right edge and
+   force the whole page to scroll sideways. Let the link row wrap under the
+   brand and tighten the banner spacing so everything stays on-screen. */
+@media (max-width: 600px) {
+    .nav-inner {
+        flex-wrap: wrap;
+        gap: 0.3rem 1rem;
+        padding: 0.6rem 1rem;
+    }
+    .nav-brand {
+        font-size: 1.3rem;
+    }
+    /* Full-width second row that wraps its links instead of overflowing. */
+    .nav-links {
+        width: 100%;
+        flex-wrap: wrap;
+        gap: 0.75rem 1.15rem;
+    }
+    .nav-links a {
+        font-size: 0.98rem;
+    }
+
+    /* Trim the desktop gutters and section rhythm to reclaim phone width. */
+    .page {
+        padding: 0 1rem 4rem;
+    }
+    .section {
+        padding: 2rem 0;
+    }
+
+    /* Give the anchored-scroll offset room for the now-taller wrapped banner,
+       and trim the root rem a touch. Every canvas overlay (nodes, timer bars,
+       crown) is rem-sized while the stage box is viewport-driven; on a phone the
+       box is far below the ~520px the ring-fit math assumes, so the fixed-rem
+       stacks poke past the edge. A smaller rem shrinks those overlays to fit
+       (and tightens the prose measure) without touching the desktop layout. */
+    html {
+        font-size: 14px;
+        scroll-padding-top: 6rem;
+    }
+}
+
 @media (max-width: 560px) {
     /* Stack the pro/con pair on narrow screens. */
     .tradeoff {
@@ -1716,5 +1767,10 @@ body {
     }
     .pg-status {
         white-space: normal;
+    }
+    /* Even, slightly tighter padding around the scenario figures so the boxed
+       animation isn't squeezed against the reduced page gutters. */
+    .sc-root {
+        padding: 0.8rem 0.7rem 0.7rem;
     }
 }

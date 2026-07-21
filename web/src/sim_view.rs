@@ -529,8 +529,10 @@ const MIN_SCALE: f64 = 0.45;
 /// than clustering toward center. The stacks then sit nearer the stage edge — the
 /// fit-height box simply grows (taller/wider) to accommodate them, which is fine
 /// for the blog canvases. `node_max_scale`'s stage-edge fit assumes a conservative
-/// 520px box (`REM_UNIT`); the real stage is wider, so this floor doesn't clip in
-/// practice.
+/// 520px box (`REM_UNIT`); on desktop the real stage is wider, so this floor
+/// doesn't clip in practice. On phones the stage is *narrower* than 520px, which
+/// would push the fixed-rem stacks past the edge — the CSS mobile breakpoint
+/// shrinks the root rem to compensate (see `main.css` `@media (max-width:600px)`).
 const FIT_MIN_SCALE: f64 = 0.78;
 
 /// Vertical squish applied to the ring layout in `fit_height` (walkthrough)
